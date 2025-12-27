@@ -1,0 +1,33 @@
+[project]
+name = "codex-transcripts"
+version = "0.1.0"
+description = "Convert Codex session files to HTML transcripts"
+readme = "README.md"
+license = "Apache-2.0"
+authors = [
+    { name = "Codex Transcripts" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "click",
+    "click-default-group",
+    "jinja2",
+    "markdown",
+    "questionary",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-org/codex-transcripts"
+Issues = "https://github.com/your-org/codex-transcripts/issues"
+
+[project.scripts]
+codex-transcripts = "codex_transcripts:main"
+
+[build-system]
+requires = ["uv_build>=0.9.7,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]

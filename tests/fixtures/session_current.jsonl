@@ -1,0 +1,5 @@
+{"timestamp":"2025-01-01T00:00:00Z","type":"session_meta","payload":{"id":"abc123","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp/project","instructions":"System instructions","git":{"commit_hash":"deadbeefdeadbeef","branch":"main","repository_url":"https://github.com/example/repo.git"}}}
+{"timestamp":"2025-01-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Hello"}]}}
+{"timestamp":"2025-01-01T00:00:02Z","type":"response_item","payload":{"type":"function_call","name":"shell_command","arguments":"{\"command\":\"ls\",\"workdir\":\"/tmp/project\"}","call_id":"call-1"}}
+{"timestamp":"2025-01-01T00:00:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"Exit code: 0\nOutput:\nfile.txt"}}
+{"timestamp":"2025-01-01T00:00:04Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done"}]}}
