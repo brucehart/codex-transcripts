@@ -123,6 +123,8 @@ def extract_github_repo(repo_url):
         return None
     owner = match.group("owner")
     repo = match.group("repo")
+    if repo.endswith(".git"):
+        repo = repo[:-4]
     return f"{owner}/{repo}"
 
 
@@ -366,7 +368,7 @@ document.querySelectorAll('pre.json').forEach(function(el) {
     var text = el.textContent;
     text = text.replace(/"([^"]+)":/g, '<span style="color: #ce93d8">"$1"</span>:');
     text = text.replace(/: "([^"]*)"/g, ': <span style="color: #81d4fa">"$1"</span>');
-    text = text.replace(/: (\d+)/g, ': <span style="color: #ffcc80">$1</span>');
+    text = text.replace(/: (\\d+)/g, ': <span style="color: #ffcc80">$1</span>');
     text = text.replace(/: (true|false|null)/g, ': <span style="color: #f48fb1">$1</span>');
     el.innerHTML = text;
 });
