@@ -135,6 +135,37 @@ def slugify(text):
     return slug.strip("-") or "unknown"
 
 
+def is_path_like(text):
+    if not text:
+        return False
+    if text.startswith(("/", "~")):
+        return True
+    if re.match(r"^[A-Za-z]:[\\\\/]", text):
+        return True
+    if "\\" in text:
+        return True
+    return False
+
+
+def format_project_label(display_name):
+    if not display_name or display_name == "Unknown":
+        return None
+    if is_path_like(display_name):
+        return Path(display_name).name or display_name
+    return display_name
+
+
+def build_local_session_label(session, summary, max_length=80):
+    project_key, display_name = resolve_project_key(session)
+    project_label = format_project_label(display_name or project_key)
+    label = summary
+    if project_label:
+        label = f"{project_label} — {label}"
+    if max_length and len(label) > max_length:
+        return label[: max_length - 3] + "..."
+    return label
+
+
 def detect_error_from_output(output):
     if isinstance(output, dict):
         metadata = output.get("metadata")
@@ -1382,9 +1413,9 @@ def local_cmd(
         mod_time = datetime.fromtimestamp(stat.st_mtime)
         size_kb = stat.st_size / 1024
         date_str = mod_time.strftime("%Y-%m-%d %H:%M")
-        if len(summary) > 50:
-            summary = summary[:47] + "..."
-        display = f"{date_str}  {size_kb:5.0f} KB  {summary}"
+        session = parse_session_file(filepath)
+        display_summary = build_local_session_label(session, summary, max_length=80)
+        display = f"{date_str}  {size_kb:5.0f} KB  {display_summary}"
         choices.append(questionary.Choice(title=display, value=filepath))
 
     selected = questionary.select(

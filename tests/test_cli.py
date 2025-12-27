@@ -2,7 +2,13 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
-from codex_transcripts import cli, generate_html
+from codex_transcripts import (
+    build_local_session_label,
+    cli,
+    generate_html,
+    get_session_summary,
+    parse_session_file,
+)
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "session_current.jsonl"
@@ -81,3 +87,10 @@ def test_all_cli_generates_archive(tmp_path):
     assert (project_dir / "index.html").exists()
     assert (project_dir / "run-a" / "index.html").exists()
     assert (project_dir / "run-b" / "index.html").exists()
+
+
+def test_build_local_session_label_includes_repo():
+    session = parse_session_file(FIXTURE)
+    summary = get_session_summary(FIXTURE)
+    label = build_local_session_label(session, summary, max_length=80)
+    assert label.startswith("example/repo — Hello")
