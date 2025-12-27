@@ -34,6 +34,16 @@ codex-transcripts
 codex-transcripts local
 ```
 
+### Create a GitHub gist
+
+```bash
+codex-transcripts local --gist
+codex-transcripts json ~/.codex/sessions/2025/12/24/rollout-...jsonl --gist-public
+```
+
+This prints a GitHub gist URL plus a `gistpreview.github.io` link that renders the HTML.
+The gist uses a descriptive HTML filename based on the session details.
+
 ### Convert a specific file
 
 ```bash
@@ -54,6 +64,8 @@ All commands support:
 - `-a, --output-auto` - auto-name a subdirectory based on the session filename
 - `--open` - open the generated `index.html` in your default browser
 - `--json` - include the source JSONL file in the output directory
+- `--gist` - create a GitHub gist from the generated HTML and output a preview URL (requires the `gh` CLI)
+- `--gist-public` - create a public gist instead of a secret gist
 
 If no browser is available, the CLI prints a `file://` URL you can open locally (useful for WSL2).
 

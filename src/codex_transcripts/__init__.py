@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import tempfile
+import subprocess
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -21,7 +22,8 @@ LONG_TEXT_THRESHOLD = 300
 
 COMMIT_PATTERN = re.compile(r"\[[\w\-/]+ ([a-f0-9]{7,})\] (.+?)(?:\n|$)")
 GITHUB_REPO_PATTERN = re.compile(
-    r"github\.com[:/](?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)(?:\.git)?"
+    r"(?:https?://)?(?:api\.)?github\.com[:/](?:repos/)?"
+    r"(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)(?:\.git)?"
 )
 
 _jinja_env = Environment(
@@ -380,6 +382,41 @@ document.querySelectorAll('.truncatable').forEach(function(wrapper) {
         });
     }
 });
+"""
+
+# JavaScript to fix relative URLs when served via gistpreview.github.io
+GIST_PREVIEW_JS = r"""
+(function() {
+    if (window.location.hostname !== 'gistpreview.github.io') return;
+    // URL format: https://gistpreview.github.io/?GIST_ID/filename.html
+    var match = window.location.search.match(/^\?([^/]+)/);
+    if (!match) return;
+    var gistId = match[1];
+    document.querySelectorAll('a[href]').forEach(function(link) {
+        var href = link.getAttribute('href');
+        // Skip external links and anchors
+        if (!href || href.startsWith('http') || href.startsWith('#')) return;
+        var parts = href.split('#');
+        var filename = parts[0];
+        var anchor = parts.length > 1 ? '#' + parts[1] : '';
+        link.setAttribute('href', '?' + gistId + '/' + filename + anchor);
+    });
+
+    // Handle fragment navigation after dynamic content loads
+    // gistpreview.github.io loads content dynamically, so the browser's
+    // native fragment navigation fails because the element doesn't exist yet
+    function scrollToFragment() {
+        var hash = window.location.hash;
+        if (!hash) return;
+        var element = document.querySelector(hash);
+        if (element) {
+            element.scrollIntoView();
+        } else {
+            setTimeout(scrollToFragment, 100);
+        }
+    }
+    scrollToFragment();
+})();
 """
 
 
@@ -1137,6 +1174,133 @@ def open_or_print_url(url):
         click.echo(url)
 
 
+def format_session_timestamp(timestamp):
+    if not timestamp:
+        return None
+    try:
+        cleaned = timestamp.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(cleaned)
+        return parsed.strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return timestamp
+
+
+def build_gist_label(session, source_path):
+    parts = []
+    started_at = format_session_timestamp(session.started_at)
+    if started_at:
+        parts.append(started_at)
+    if session.session_id:
+        parts.append(session.session_id)
+    else:
+        parts.append(Path(source_path).stem)
+    label = " ".join(parts).strip()
+    return label or Path(source_path).stem
+
+
+def build_gist_description(session, source_path):
+    return f"Codex transcript: {build_gist_label(session, source_path)}"
+
+
+def build_gist_index_filename(session, source_path):
+    label = build_gist_label(session, source_path)
+    slug = slugify(f"codex-transcript-{label}")
+    return f"{slug}.html"
+
+
+def inject_gist_preview_js(output_dir):
+    output_dir = Path(output_dir)
+    for html_file in output_dir.glob("*.html"):
+        content = html_file.read_text(encoding="utf-8")
+        if "gistpreview.github.io" in content:
+            continue
+        if "</body>" in content:
+            content = content.replace(
+                "</body>", f"<script>{GIST_PREVIEW_JS}</script>\n</body>"
+            )
+            html_file.write_text(content, encoding="utf-8")
+
+
+def stage_gist_files(output_dir, include_json, index_filename, staging_dir=None):
+    output_dir = Path(output_dir)
+    html_files = sorted(output_dir.glob("*.html"))
+    if not html_files:
+        raise click.ClickException(f"No transcript files found in {output_dir}")
+
+    if staging_dir:
+        staging_dir = Path(staging_dir)
+    else:
+        staging_dir = Path(tempfile.mkdtemp(prefix="codex-gist-"))
+    staged_files = []
+    index_target = staging_dir / index_filename
+
+    for html_file in html_files:
+        content = html_file.read_text(encoding="utf-8")
+        content = content.replace('href="index.html"', f'href="{index_filename}"')
+        content = content.replace("href='index.html'", f"href='{index_filename}'")
+        if html_file.name == "index.html":
+            index_target.write_text(content, encoding="utf-8")
+        else:
+            target = staging_dir / html_file.name
+            target.write_text(content, encoding="utf-8")
+            staged_files.append(target)
+
+    staged_files.insert(0, index_target)
+    if not index_target.exists():
+        raise click.ClickException("Missing index.html in transcript output.")
+
+    if include_json:
+        for json_file in sorted(output_dir.glob("*.jsonl")):
+            target = staging_dir / json_file.name
+            shutil.copy(json_file, target)
+            staged_files.append(target)
+
+    inject_gist_preview_js(staging_dir)
+
+    return staged_files, index_target, staging_dir
+
+
+def extract_gist_id(gist_url):
+    if not gist_url:
+        return None
+    return gist_url.rstrip("/").split("/")[-1]
+
+
+def create_gist_from_output(output_dir, description, public, include_json, index_filename):
+    gh_path = shutil.which("gh")
+    if not gh_path:
+        raise click.ClickException(
+            "GitHub CLI 'gh' not found. Install it from https://cli.github.com/ "
+            "and run `gh auth login`."
+        )
+
+    with tempfile.TemporaryDirectory(prefix="codex-gist-") as temp_dir:
+        files, index_target, _ = stage_gist_files(
+            output_dir,
+            include_json,
+            index_filename,
+            staging_dir=temp_dir,
+        )
+
+        cmd = [gh_path, "gist", "create", *[str(path) for path in files]]
+        if description:
+            cmd.extend(["--desc", description])
+        if public:
+            cmd.append("--public")
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            error = result.stderr.strip() or result.stdout.strip() or "Unknown error"
+            raise click.ClickException(f"Failed to create gist: {error}")
+
+        gist_url = result.stdout.strip().splitlines()[-1] if result.stdout else ""
+        gist_id = extract_gist_id(gist_url)
+        preview_url = None
+        if gist_id:
+            preview_url = f"https://gistpreview.github.io/?{gist_id}/{index_target.name}"
+        return gist_url, preview_url
+
+
 @click.group(cls=DefaultGroup, default="local", default_if_no_args=True)
 @click.version_option(None, "-v", "--version", package_name="codex-transcripts")
 def cli():
@@ -1164,6 +1328,18 @@ def cli():
     help="Include the original JSONL session file in the output directory.",
 )
 @click.option(
+    "--gist",
+    "create_gist",
+    is_flag=True,
+    help="Create a GitHub gist from the generated HTML and output a preview URL.",
+)
+@click.option(
+    "--gist-public",
+    "gist_public",
+    is_flag=True,
+    help="Create a public GitHub gist (default: secret). Implies --gist.",
+)
+@click.option(
     "--open",
     "open_browser",
     is_flag=True,
@@ -1174,7 +1350,15 @@ def cli():
     default=10,
     help="Maximum number of sessions to show (default: 10)",
 )
-def local_cmd(output, output_auto, include_json, open_browser, limit):
+def local_cmd(
+    output,
+    output_auto,
+    include_json,
+    create_gist,
+    gist_public,
+    open_browser,
+    limit,
+):
     """Select and convert a local Codex session to HTML."""
     sessions_folder = Path.home() / ".codex" / "sessions"
 
@@ -1224,6 +1408,25 @@ def local_cmd(output, output_auto, include_json, open_browser, limit):
 
     click.echo(f"Output: {output.resolve()}")
 
+    if create_gist or gist_public:
+        session = parse_session_file(session_file)
+        description = build_gist_description(session, session_file)
+        index_filename = build_gist_index_filename(session, session_file)
+        click.echo("Creating GitHub gist...")
+        gist_url, preview_url = create_gist_from_output(
+            output,
+            description,
+            public=gist_public,
+            include_json=include_json,
+            index_filename=index_filename,
+        )
+        if gist_url:
+            click.echo(f"Gist: {gist_url}")
+        else:
+            click.echo("Gist created, but no URL was returned.")
+        if preview_url:
+            click.echo(f"Preview: {preview_url}")
+
     if open_browser or auto_open:
         open_or_print_url(index_path.resolve().as_uri())
 
@@ -1249,12 +1452,24 @@ def local_cmd(output, output_auto, include_json, open_browser, limit):
     help="Include the original JSONL session file in the output directory.",
 )
 @click.option(
+    "--gist",
+    "create_gist",
+    is_flag=True,
+    help="Create a GitHub gist from the generated HTML and output a preview URL.",
+)
+@click.option(
+    "--gist-public",
+    "gist_public",
+    is_flag=True,
+    help="Create a public GitHub gist (default: secret). Implies --gist.",
+)
+@click.option(
     "--open",
     "open_browser",
     is_flag=True,
     help="Open the generated index.html in your default browser (default if no -o specified).",
 )
-def json_cmd(json_file, output, output_auto, include_json, open_browser):
+def json_cmd(json_file, output, output_auto, include_json, create_gist, gist_public, open_browser):
     """Convert a Codex session JSONL file to HTML."""
     auto_open = output is None and not output_auto
     if output_auto:
@@ -1267,6 +1482,25 @@ def json_cmd(json_file, output, output_auto, include_json, open_browser):
     index_path = generate_html(json_file, output, include_json=include_json)
 
     click.echo(f"Output: {output.resolve()}")
+
+    if create_gist or gist_public:
+        session = parse_session_file(json_file)
+        description = build_gist_description(session, json_file)
+        index_filename = build_gist_index_filename(session, json_file)
+        click.echo("Creating GitHub gist...")
+        gist_url, preview_url = create_gist_from_output(
+            output,
+            description,
+            public=gist_public,
+            include_json=include_json,
+            index_filename=index_filename,
+        )
+        if gist_url:
+            click.echo(f"Gist: {gist_url}")
+        else:
+            click.echo("Gist created, but no URL was returned.")
+        if preview_url:
+            click.echo(f"Preview: {preview_url}")
 
     if open_browser or auto_open:
         open_or_print_url(index_path.resolve().as_uri())
