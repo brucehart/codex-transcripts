@@ -7,10 +7,10 @@ import re
 import shutil
 import tempfile
 import subprocess
-import webbrowser
 from datetime import datetime
 from pathlib import Path
 
+import bleach
 import click
 from click_default_group import DefaultGroup
 from jinja2 import Environment, PackageLoader
@@ -34,15 +34,60 @@ _jinja_env = Environment(
 _macros_template = _jinja_env.get_template("macros.html")
 _macros = _macros_template.module
 
+_ALLOWED_TAGS = [
+    "a",
+    "blockquote",
+    "br",
+    "code",
+    "em",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "hr",
+    "li",
+    "ol",
+    "p",
+    "pre",
+    "strong",
+    "table",
+    "tbody",
+    "td",
+    "th",
+    "thead",
+    "tr",
+    "ul",
+]
+_ALLOWED_ATTRIBUTES = {
+    "a": ["href", "title"],
+    "code": ["class"],
+    "pre": ["class"],
+}
+_ALLOWED_PROTOCOLS = ["http", "https", "mailto"]
+
 
 def get_template(name):
     return _jinja_env.get_template(name)
 
 
+def sanitize_html(content_html):
+    return bleach.clean(
+        content_html,
+        tags=_ALLOWED_TAGS,
+        attributes=_ALLOWED_ATTRIBUTES,
+        protocols=_ALLOWED_PROTOCOLS,
+        strip=True,
+        strip_comments=True,
+    )
+
+
 def render_markdown_text(text):
     if not text:
         return ""
-    return markdown.markdown(text, extensions=["fenced_code", "tables"])
+    rendered = markdown.markdown(text, extensions=["fenced_code", "tables"])
+    return sanitize_html(rendered)
 
 
 def is_json_like(text):
@@ -397,6 +442,7 @@ document.querySelectorAll('time[data-timestamp]').forEach(function(el) {
 });
 document.querySelectorAll('pre.json').forEach(function(el) {
     var text = el.textContent;
+    text = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     text = text.replace(/"([^"]+)":/g, '<span style="color: #ce93d8">"$1"</span>:');
     text = text.replace(/: "([^"]*)"/g, ': <span style="color: #81d4fa">"$1"</span>');
     text = text.replace(/: (\\d+)/g, ': <span style="color: #ffcc80">$1</span>');
@@ -1198,13 +1244,8 @@ def generate_batch_html(source_folder, output_dir, include_json=False, progress_
 
 
 def open_or_print_url(url):
-    try:
-        opened = webbrowser.open(url)
-    except Exception:
-        opened = False
-    if not opened:
-        click.echo("Open this URL in your browser:")
-        click.echo(url)
+    click.echo("Open this URL in your browser:")
+    click.echo(url)
 
 
 def format_session_timestamp(timestamp):
