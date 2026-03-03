@@ -137,3 +137,19 @@ def test_generate_batch_html_incremental_uses_hash_to_detect_same_size_same_mtim
     assert second_stats["total_sessions"] == 1
     assert second_stats["skipped_sessions"] == 0
     assert render_calls["count"] == 1
+
+
+def test_generate_batch_html_non_incremental_does_not_compute_sha(tmp_path, monkeypatch):
+    sessions_dir = tmp_path / "sessions"
+    session_path = sessions_dir / "2025" / "12" / "24" / "run-a.jsonl"
+    write_fixture(session_path)
+
+    def fail_sha(*args, **kwargs):
+        raise AssertionError("sha256 should not run when incremental=False")
+
+    monkeypatch.setattr(archive_module.hashlib, "sha256", fail_sha)
+
+    output_dir = tmp_path / "archive"
+    stats = generate_batch_html(sessions_dir, output_dir, incremental=False)
+    assert stats["total_sessions"] == 1
+    assert stats["skipped_sessions"] == 0
