@@ -612,7 +612,8 @@ def generate_batch_html(
                 text_enabled=export_txt,
                 pdf_enabled=export_pdf,
             )
-        cache_state["sha256"] = _sha256_file(session_path)
+        if incremental:
+            cache_state["sha256"] = _sha256_file(session_path)
         return {"skipped": False, "cache_state": cache_state}
 
     def on_task_complete(task: dict[str, Any], result: dict[str, Any] | None, error: Exception | None):

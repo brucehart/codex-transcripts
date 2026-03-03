@@ -125,7 +125,11 @@ def stage_gist_files(
             staged_files.append(target)
 
     if assets_dir.exists() and assets_dir.is_dir():
-        shutil.copytree(assets_dir, staging_dir / "assets", dirs_exist_ok=True)
+        staged_assets_dir = staging_dir / "assets"
+        shutil.copytree(assets_dir, staged_assets_dir, dirs_exist_ok=True)
+        for asset_file in sorted(staged_assets_dir.rglob("*")):
+            if asset_file.is_file():
+                staged_files.append(asset_file)
 
     for artifact in sorted(output_dir.glob("search-index*.js")):
         target = staging_dir / artifact.name

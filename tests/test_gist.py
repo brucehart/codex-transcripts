@@ -145,4 +145,5 @@ def test_stage_gist_files_includes_assets_and_search_artifacts(tmp_path):
     assert (staging_dir / "search-index.js").exists()
     assert (staging_dir / "search-index.json").exists()
     assert (staging_dir / "search-index-0000.js").exists()
+    assert any(path.name == "base.css" and path.parent.name == "assets" for path in files)
     assert any(path.name == "search-index.js" for path in files)
