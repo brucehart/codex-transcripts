@@ -149,3 +149,91 @@ def test_diff_cli_generates_report(tmp_path):
     assert result.exit_code == 0, result.output
     assert (output_dir / "index.html").exists()
     assert (output_dir / "diff.json").exists()
+
+
+def test_json_cli_warns_on_skipped_malformed_rows(tmp_path):
+    session_file = tmp_path / "session.jsonl"
+    session_file.write_text(
+        "\n".join(
+            [
+                '{"timestamp":"2025-01-01T00:00:00Z","type":"session_meta","payload":{"id":"abc123"}}',
+                "{not valid json}",
+                '{"timestamp":"2025-01-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Hello"}]}}',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / "output"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["json", str(session_file), "-o", str(output_dir)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Warning: skipped 1 malformed JSON row(s)" in result.output
+    assert (output_dir / "index.html").exists()
+
+
+def test_json_cli_strict_rows_fails_on_malformed_input(tmp_path):
+    session_file = tmp_path / "session.jsonl"
+    session_file.write_text(
+        "\n".join(
+            [
+                '{"timestamp":"2025-01-01T00:00:00Z","type":"session_meta","payload":{"id":"abc123"}}',
+                "{not valid json}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / "output"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["json", str(session_file), "-o", str(output_dir), "--strict-rows"],
+    )
+
+    assert result.exit_code != 0
+    assert "Invalid JSON row at line 2" in result.output
+
+
+def test_json_cli_redaction_is_consistent_across_all_outputs(tmp_path):
+    session_file = tmp_path / "session.jsonl"
+    session_file.write_text(
+        "\n".join(
+            [
+                '{"timestamp":"2025-01-01T00:00:00Z","type":"session_meta","payload":{"id":"abc123"}}',
+                '{"timestamp":"2025-01-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Contact me at user@example.com"}]}}',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / "output"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "json",
+            str(session_file),
+            "-o",
+            str(output_dir),
+            "--markdown",
+            "--txt",
+            "--redact-pattern",
+            r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    page_content = (output_dir / "page-001.html").read_text(encoding="utf-8")
+    index_content = (output_dir / "index.html").read_text(encoding="utf-8")
+    search_content = (output_dir / "search-index.json").read_text(encoding="utf-8")
+    md_content = (output_dir / "transcript.md").read_text(encoding="utf-8")
+    txt_content = (output_dir / "transcript.txt").read_text(encoding="utf-8")
+
+    for content in (page_content, index_content, search_content, md_content, txt_content):
+        assert "user@example.com" not in content
+        assert "[REDACTED]" in content

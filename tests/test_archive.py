@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 
 import pytest
 
@@ -101,3 +102,38 @@ def test_generate_batch_html_master_index_contains_filter_controls(tmp_path):
     master_index = (output_dir / "index.html").read_text(encoding="utf-8")
     assert "filter-tool" in master_index
     assert "archive-session-item" in master_index
+
+
+def test_generate_batch_html_incremental_uses_hash_to_detect_same_size_same_mtime_changes(
+    tmp_path, monkeypatch
+):
+    sessions_dir = tmp_path / "sessions"
+    session_path = sessions_dir / "2025" / "12" / "24" / "run-a.jsonl"
+    write_fixture(session_path)
+
+    output_dir = tmp_path / "archive"
+    first_stats = generate_batch_html(sessions_dir, output_dir, incremental=True)
+    assert first_stats["total_sessions"] == 1
+    assert first_stats["skipped_sessions"] == 0
+
+    original_mtime = session_path.stat().st_mtime
+    original_text = session_path.read_text(encoding="utf-8")
+    mutated_text = original_text.replace("Hello", "Jello", 1)
+    assert len(mutated_text) == len(original_text)
+    session_path.write_text(mutated_text, encoding="utf-8")
+
+    os.utime(session_path, (original_mtime, original_mtime))
+
+    render_calls = {"count": 0}
+    original_generate = archive_module.generate_html_from_session
+
+    def counting_generate(*args, **kwargs):
+        render_calls["count"] += 1
+        return original_generate(*args, **kwargs)
+
+    monkeypatch.setattr(archive_module, "generate_html_from_session", counting_generate)
+
+    second_stats = generate_batch_html(sessions_dir, output_dir, incremental=True)
+    assert second_stats["total_sessions"] == 1
+    assert second_stats["skipped_sessions"] == 0
+    assert render_calls["count"] == 1

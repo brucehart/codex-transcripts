@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 import json
 import re
 from pathlib import Path
@@ -36,6 +37,8 @@ class SessionData:
     entries: list[Entry]
     source_path: Path
     instruction_repeats: int = 1
+    invalid_json_rows: int = 0
+    invalid_json_line_numbers: list[int] | None = None
 
 
 def extract_text_from_content(content: Any) -> str:
@@ -84,9 +87,22 @@ def normalize_text_for_match(text: str | None) -> str:
 def is_instruction_repeat(message_text: str | None, instructions_text: str | None) -> bool:
     if not message_text or not instructions_text:
         return False
-    return normalize_text_for_match(instructions_text) in normalize_text_for_match(
-        message_text
-    )
+    normalized_message = normalize_text_for_match(message_text)
+    normalized_instructions = normalize_text_for_match(instructions_text)
+    if not normalized_message or not normalized_instructions:
+        return False
+
+    if normalized_message == normalized_instructions:
+        return True
+
+    if normalized_message in normalized_instructions or normalized_instructions in normalized_message:
+        smaller = min(len(normalized_message), len(normalized_instructions))
+        larger = max(len(normalized_message), len(normalized_instructions))
+        if smaller and smaller / larger >= 0.95:
+            return True
+
+    similarity = SequenceMatcher(None, normalized_instructions, normalized_message).ratio()
+    return similarity >= 0.93
 
 
 def _message_dedup_key(role: str | None, content_text: str) -> tuple[str, str]:
@@ -156,7 +172,7 @@ def _append_tool_output(
     )
 
 
-def parse_session_file(filepath: str | Path) -> SessionData:
+def parse_session_file(filepath: str | Path, *, strict_rows: bool = False) -> SessionData:
     filepath = Path(filepath)
     entries: list[Entry] = []
     session_id = filepath.stem
@@ -169,6 +185,8 @@ def parse_session_file(filepath: str | Path) -> SessionData:
     recent_message_keys: deque[tuple[str, str]] = deque(maxlen=MESSAGE_DEDUP_WINDOW)
     recent_message_set: set[tuple[str, str]] = set()
     valid_row_count = 0
+    invalid_json_rows = 0
+    invalid_json_line_numbers: list[int] = []
 
     def should_append_message(role: str | None, content_text: str) -> bool:
         key = _message_dedup_key(role, content_text)
@@ -187,13 +205,20 @@ def parse_session_file(filepath: str | Path) -> SessionData:
         return True
 
     with open(filepath, "r", encoding="utf-8") as f:
-        for line in f:
+        for line_no, line in enumerate(f, start=1):
             line = line.strip()
             if not line:
                 continue
             try:
                 obj = json.loads(line)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
+                invalid_json_rows += 1
+                if len(invalid_json_line_numbers) < 20:
+                    invalid_json_line_numbers.append(line_no)
+                if strict_rows:
+                    raise ValueError(
+                        f"Invalid JSON row at line {line_no} in session file {filepath}: {exc}"
+                    ) from exc
                 continue
             valid_row_count += 1
 
@@ -310,6 +335,11 @@ def parse_session_file(filepath: str | Path) -> SessionData:
         instruction_repeats = 1
 
     if valid_row_count == 0:
+        if invalid_json_rows:
+            raise ValueError(
+                "No valid JSON rows in session file: "
+                f"{filepath} (invalid rows: {invalid_json_rows})"
+            )
         raise ValueError(f"No valid JSON rows in session file: {filepath}")
 
     return SessionData(
@@ -321,6 +351,8 @@ def parse_session_file(filepath: str | Path) -> SessionData:
         entries=entries,
         source_path=filepath,
         instruction_repeats=instruction_repeats,
+        invalid_json_rows=invalid_json_rows,
+        invalid_json_line_numbers=invalid_json_line_numbers or None,
     )
 
 

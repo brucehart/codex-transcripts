@@ -62,6 +62,17 @@ def _write_stats_if_requested(
     return write_stats_report(report, output_dir / "stats.json")
 
 
+def _warn_invalid_rows(session: SessionData, source_path: Path) -> None:
+    invalid_rows = int(session.invalid_json_rows or 0)
+    if invalid_rows < 1:
+        return
+    samples = ", ".join(str(line) for line in (session.invalid_json_line_numbers or [])[:10])
+    sample_suffix = f" (line samples: {samples})" if samples else ""
+    click.echo(
+        f"Warning: skipped {invalid_rows} malformed JSON row(s) in {source_path}{sample_suffix}"
+    )
+
+
 def _render_single_session_output(
     *,
     session: SessionData,
@@ -210,6 +221,11 @@ def cli():
     help="Regex pattern to redact from rendered/exported output. Repeatable.",
 )
 @click.option(
+    "--strict-rows",
+    is_flag=True,
+    help="Fail on malformed JSON rows instead of skipping them.",
+)
+@click.option(
     "--limit",
     default=10,
     help="Maximum number of sessions to show (default: 10)",
@@ -230,6 +246,7 @@ def local_cmd(
     redact_enabled,
     redact_presets,
     redact_patterns,
+    strict_rows,
     limit,
 ):
     """Select and convert a local Codex session to HTML."""
@@ -269,7 +286,11 @@ def local_cmd(
         redact_presets,
         redact_patterns,
     )
-    selected_session = record_by_path.get(session_file) or parse_session_file(session_file)
+    if strict_rows:
+        selected_session = parse_session_file(session_file, strict_rows=True)
+    else:
+        selected_session = record_by_path.get(session_file) or parse_session_file(session_file)
+        _warn_invalid_rows(selected_session, session_file)
     index_path, stats_path = _render_single_session_output(
         session=selected_session,
         source_path=session_file,
@@ -405,6 +426,11 @@ def local_cmd(
     multiple=True,
     help="Regex pattern to redact from rendered/exported output. Repeatable.",
 )
+@click.option(
+    "--strict-rows",
+    is_flag=True,
+    help="Fail on malformed JSON rows instead of skipping them.",
+)
 def json_cmd(
     json_file,
     output,
@@ -422,6 +448,7 @@ def json_cmd(
     redact_enabled,
     redact_presets,
     redact_patterns,
+    strict_rows,
 ):
     """Convert a Codex session JSONL file to HTML."""
     json_path = Path(json_file)
@@ -431,7 +458,9 @@ def json_cmd(
         redact_presets,
         redact_patterns,
     )
-    session = parse_session_file(json_path)
+    session = parse_session_file(json_path, strict_rows=strict_rows)
+    if not strict_rows:
+        _warn_invalid_rows(session, json_path)
     index_path, stats_path = _render_single_session_output(
         session=session,
         source_path=json_path,
@@ -514,6 +543,11 @@ def json_cmd(
     "--strict",
     is_flag=True,
     help="Fail immediately on parse/render errors.",
+)
+@click.option(
+    "--strict-rows",
+    is_flag=True,
+    help="Fail parsing individual session files on malformed JSON rows.",
 )
 @click.option(
     "--incremental",
@@ -625,6 +659,7 @@ def all_cmd(
     quiet,
     skip_bad_files,
     strict,
+    strict_rows,
     incremental,
     workers,
     search_mode,
@@ -673,6 +708,7 @@ def all_cmd(
             progress_callback=on_progress,
             skip_bad_files=skip_bad_files,
             strict=strict,
+            strict_rows=strict_rows,
             incremental=incremental,
             workers=workers,
             search_mode=_resolve_search_mode(search_mode),
@@ -700,6 +736,19 @@ def all_cmd(
         click.echo(f"\nWarning: {len(stats['scan_failures'])} session file(s) failed to parse:")
         for failure in stats["scan_failures"]:
             click.echo(f"  {failure['path']}: {failure['error']}")
+
+    if stats.get("invalid_row_warnings"):
+        warnings = stats["invalid_row_warnings"]
+        click.echo(
+            f"\nWarning: {len(warnings)} session file(s) had malformed rows that were skipped:"
+        )
+        preview_limit = 20
+        for warning in warnings[:preview_limit]:
+            samples = ", ".join(str(line) for line in warning.get("line_numbers", [])[:10])
+            suffix = f" (line samples: {samples})" if samples else ""
+            click.echo(f"  {warning['path']}: {warning['count']} row(s){suffix}")
+        if len(warnings) > preview_limit:
+            click.echo(f"  ... and {len(warnings) - preview_limit} more")
 
     if stats["failed_sessions"]:
         click.echo(f"\nWarning: {len(stats['failed_sessions'])} session(s) failed:")
@@ -779,6 +828,11 @@ def all_cmd(
     multiple=True,
     help="Regex pattern to redact from diff output. Repeatable.",
 )
+@click.option(
+    "--strict-rows",
+    is_flag=True,
+    help="Fail on malformed JSON rows instead of skipping them.",
+)
 def diff_cmd(
     session_a,
     session_b,
@@ -790,12 +844,16 @@ def diff_cmd(
     redact_enabled,
     redact_presets,
     redact_patterns,
+    strict_rows,
 ):
     """Generate a diff view between two transcript sessions."""
     path_a = Path(session_a)
     path_b = Path(session_b)
-    data_a = parse_session_file(path_a)
-    data_b = parse_session_file(path_b)
+    data_a = parse_session_file(path_a, strict_rows=strict_rows)
+    data_b = parse_session_file(path_b, strict_rows=strict_rows)
+    if not strict_rows:
+        _warn_invalid_rows(data_a, path_a)
+        _warn_invalid_rows(data_b, path_b)
 
     project_a, _display_a = resolve_project_key(data_a)
     project_b, _display_b = resolve_project_key(data_b)

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from codex_transcripts import parse_session_file, resolve_project_key, get_session_summary
 
 
@@ -95,3 +97,85 @@ def test_legacy_format_is_still_supported(tmp_path):
         for entry in session.entries
     )
     assert any(entry.entry_type == "tool_output" for entry in session.entries)
+
+
+def test_parse_session_records_invalid_json_rows_in_non_strict_mode(tmp_path):
+    session_file = tmp_path / "session.jsonl"
+    session_file.write_text(
+        "\n".join(
+            [
+                '{"timestamp":"2025-01-01T00:00:00Z","type":"session_meta","payload":{"id":"abc123"}}',
+                "{not valid json}",
+                '{"timestamp":"2025-01-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Hello"}]}}',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    session = parse_session_file(session_file)
+    assert session.invalid_json_rows == 1
+    assert session.invalid_json_line_numbers == [2]
+    assert any(
+        entry.entry_type == "message" and entry.role == "user" and entry.content == "Hello"
+        for entry in session.entries
+    )
+
+
+def test_parse_session_strict_rows_raises_with_line_number(tmp_path):
+    session_file = tmp_path / "session.jsonl"
+    session_file.write_text(
+        "\n".join(
+            [
+                '{"timestamp":"2025-01-01T00:00:00Z","type":"session_meta","payload":{"id":"abc123"}}',
+                "{not valid json}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="line 2"):
+        parse_session_file(session_file, strict_rows=True)
+
+
+def test_instruction_fragment_message_is_not_collapsed(tmp_path):
+    session_file = tmp_path / "session.jsonl"
+    session_file.write_text(
+        "\n".join(
+            [
+                '{"timestamp":"2025-01-01T00:00:00Z","type":"session_meta","payload":{"id":"abc123","instructions":"Always run tests before deploying."}}',
+                '{"timestamp":"2025-01-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Reminder: Always run tests before deploying, then open a PR."}]}}',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    session = parse_session_file(session_file)
+    user_messages = [
+        entry
+        for entry in session.entries
+        if entry.entry_type == "message" and entry.role == "user"
+    ]
+    assert len(user_messages) == 1
+    assert not user_messages[0].content.startswith("System instructions repeated.")
+
+
+def test_instruction_exact_repeat_is_collapsed(tmp_path):
+    session_file = tmp_path / "session.jsonl"
+    session_file.write_text(
+        "\n".join(
+            [
+                '{"timestamp":"2025-01-01T00:00:00Z","type":"session_meta","payload":{"id":"abc123","instructions":"Always run tests before deploying."}}',
+                '{"timestamp":"2025-01-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Always run tests before deploying."}]}}',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    session = parse_session_file(session_file)
+    user_messages = [
+        entry
+        for entry in session.entries
+        if entry.entry_type == "message" and entry.role == "user"
+    ]
+    assert len(user_messages) == 1
+    assert user_messages[0].content.startswith("System instructions repeated.")

@@ -5,6 +5,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Sequence
@@ -13,12 +14,13 @@ from .assets import ensure_output_assets
 from .common import extract_github_repo, format_project_label, slugify
 from .exporters import write_transcript_exports
 from .parser import SessionData, get_session_summary_from_session, parse_session_file
+from .redaction import redact_session_data
 from .renderer import SearchMode, generate_html_from_session, get_template
 from .stats import collect_session_metrics
 
 
 INCREMENTAL_CACHE_FILENAME = ".codex-transcripts-cache.json"
-INCREMENTAL_CACHE_VERSION = 2
+INCREMENTAL_CACHE_VERSION = 3
 
 
 @dataclass
@@ -61,7 +63,7 @@ def get_session_summary(filepath: str | Path, max_length: int = 200):
     return get_session_summary_from_session(session, max_length=max_length)
 
 
-def find_local_session_records(folder: str | Path, limit: int = 10):
+def find_local_session_records(folder: str | Path, limit: int = 10, *, strict_rows: bool = False):
     folder = Path(folder)
     if not folder.exists():
         return []
@@ -69,7 +71,7 @@ def find_local_session_records(folder: str | Path, limit: int = 10):
     results: list[LocalSessionRecord] = []
     for json_file in folder.glob("**/*.jsonl"):
         try:
-            session = parse_session_file(json_file)
+            session = parse_session_file(json_file, strict_rows=strict_rows)
         except Exception:
             continue
         summary = get_session_summary_from_session(session)
@@ -90,12 +92,12 @@ def find_local_session_records(folder: str | Path, limit: int = 10):
     return results[:limit]
 
 
-def find_local_sessions(folder: str | Path, limit: int = 10):
-    records = find_local_session_records(folder, limit=limit)
+def find_local_sessions(folder: str | Path, limit: int = 10, *, strict_rows: bool = False):
+    records = find_local_session_records(folder, limit=limit, strict_rows=strict_rows)
     return [(record.path, record.summary) for record in records]
 
 
-def scan_all_sessions(folder: str | Path, skip_bad_files: bool = True):
+def scan_all_sessions(folder: str | Path, skip_bad_files: bool = True, *, strict_rows: bool = False):
     folder = Path(folder)
     if not folder.exists():
         return [], []
@@ -105,7 +107,7 @@ def scan_all_sessions(folder: str | Path, skip_bad_files: bool = True):
 
     for session_file in folder.glob("**/*.jsonl"):
         try:
-            session = parse_session_file(session_file)
+            session = parse_session_file(session_file, strict_rows=strict_rows)
         except Exception as exc:
             failure = {
                 "path": str(session_file),
@@ -301,7 +303,7 @@ def _load_incremental_cache(
     export_markdown: bool,
     export_txt: bool,
     export_pdf: bool,
-) -> dict[str, dict[str, float | int]]:
+) -> dict[str, dict[str, float | int | str]]:
     cache_path = output_dir / INCREMENTAL_CACHE_FILENAME
     if not cache_path.exists():
         return {}
@@ -335,20 +337,24 @@ def _load_incremental_cache(
     if not isinstance(sessions, dict):
         return {}
 
-    validated: dict[str, dict[str, float | int]] = {}
+    validated: dict[str, dict[str, float | int | str]] = {}
     for key, value in sessions.items():
         if not isinstance(key, str) or not isinstance(value, dict):
             continue
         mtime = value.get("mtime")
         size = value.get("size")
+        sha256 = value.get("sha256")
         if isinstance(mtime, (int, float)) and isinstance(size, int):
-            validated[key] = {"mtime": float(mtime), "size": int(size)}
+            state: dict[str, float | int | str] = {"mtime": float(mtime), "size": int(size)}
+            if isinstance(sha256, str) and sha256:
+                state["sha256"] = sha256
+            validated[key] = state
     return validated
 
 
 def _write_incremental_cache(
     output_dir: Path,
-    sessions: dict[str, dict[str, float | int]],
+    sessions: dict[str, dict[str, float | int | str]],
     *,
     include_json: bool,
     search_mode: SearchMode,
@@ -396,6 +402,7 @@ def generate_batch_html(
     error_only: bool = False,
     repo_filter: str | None = None,
     branch_filter: str | None = None,
+    strict_rows: bool = False,
 ):
     source_folder = Path(source_folder)
     output_dir = Path(output_dir)
@@ -405,10 +412,25 @@ def generate_batch_html(
     projects, scan_failures = scan_all_sessions(
         source_folder,
         skip_bad_files=effective_skip_bad_files,
+        strict_rows=strict_rows,
     )
 
     normalized_redact_patterns = tuple(redact_patterns or ())
     normalized_tool_filters = tuple(tool_filters or ())
+    invalid_row_warnings: list[dict[str, Any]] = []
+
+    for project in projects:
+        for session in project["sessions"]:
+            parsed_session: SessionData = session["parsed_session"]
+            invalid_rows = int(parsed_session.invalid_json_rows or 0)
+            if invalid_rows > 0:
+                invalid_row_warnings.append(
+                    {
+                        "path": str(session["path"]),
+                        "count": invalid_rows,
+                        "line_numbers": list(parsed_session.invalid_json_line_numbers or []),
+                    }
+                )
 
     # Attach metrics and apply archive-level filters.
     filtered_projects: list[dict[str, Any]] = []
@@ -445,7 +467,7 @@ def generate_batch_html(
     failed_sessions: list[dict[str, str]] = []
     skipped_sessions = 0
 
-    cache_by_session: dict[str, dict[str, float | int]] = {}
+    cache_by_session: dict[str, dict[str, float | int | str]] = {}
     if incremental:
         cache_by_session = _load_incremental_cache(
             output_dir,
@@ -484,7 +506,14 @@ def generate_batch_html(
                 }
             )
 
-    def cache_state_for(session: dict[str, Any]) -> dict[str, float | int]:
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def cache_state_for(session: dict[str, Any]) -> dict[str, float | int | str]:
         return {
             "mtime": float(session["mtime"]),
             "size": int(session["size"]),
@@ -548,34 +577,42 @@ def generate_batch_html(
 
         if incremental:
             cached = cache_by_session.get(cache_key)
-            if cached == cache_state and all(path.exists() for path in expected_files):
-                return {"skipped": True, "cache_state": cache_state}
+            if (
+                cached
+                and cached.get("mtime") == cache_state.get("mtime")
+                and cached.get("size") == cache_state.get("size")
+                and all(path.exists() for path in expected_files)
+            ):
+                cached_hash = cached.get("sha256")
+                if isinstance(cached_hash, str) and cached_hash:
+                    current_hash = _sha256_file(session_path)
+                    cache_state["sha256"] = current_hash
+                    if cached_hash == current_hash:
+                        return {"skipped": True, "cache_state": cache_state}
 
         parsed_session = session["parsed_session"]
+        session_for_output = (
+            redact_session_data(parsed_session, normalized_redact_patterns)
+            if normalized_redact_patterns
+            else parsed_session
+        )
         generate_html_from_session(
-            parsed_session,
+            session_for_output,
             session_dir,
             source_path=session_path,
             include_json=include_json,
             search_mode=search_mode,
-            redact_patterns=normalized_redact_patterns,
             theme=theme,
         )
         if export_markdown or export_txt or export_pdf:
-            from .redaction import redact_session_data
-
-            export_session = (
-                redact_session_data(parsed_session, normalized_redact_patterns)
-                if normalized_redact_patterns
-                else parsed_session
-            )
             write_transcript_exports(
-                export_session,
+                session_for_output,
                 session_dir,
                 markdown_enabled=export_markdown,
                 text_enabled=export_txt,
                 pdf_enabled=export_pdf,
             )
+        cache_state["sha256"] = _sha256_file(session_path)
         return {"skipped": False, "cache_state": cache_state}
 
     def on_task_complete(task: dict[str, Any], result: dict[str, Any] | None, error: Exception | None):
@@ -663,6 +700,7 @@ def generate_batch_html(
         "total_sessions": total_successful_sessions,
         "failed_sessions": failed_sessions,
         "scan_failures": scan_failures,
+        "invalid_row_warnings": invalid_row_warnings,
         "skipped_sessions": skipped_sessions,
         "output_dir": output_dir,
         "session_stats": all_session_stats,

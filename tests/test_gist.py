@@ -104,3 +104,45 @@ def test_stage_gist_files_requires_index_html(tmp_path):
             index_filename="session-abc.html",
             staging_dir=staging_dir,
         )
+
+
+def test_stage_gist_files_includes_assets_and_search_artifacts(tmp_path):
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "index.html").write_text(
+        '<link rel="stylesheet" href="assets/base.css"><script src="search-index.js"></script>',
+        encoding="utf-8",
+    )
+    (output_dir / "page-001.html").write_text("Page 1", encoding="utf-8")
+
+    assets_dir = output_dir / "assets"
+    assets_dir.mkdir()
+    (assets_dir / "base.css").write_text("body{}", encoding="utf-8")
+    (assets_dir / "theme.css").write_text(":root{}", encoding="utf-8")
+    (assets_dir / "runtime.js").write_text("console.log('runtime')", encoding="utf-8")
+    (assets_dir / "search.js").write_text("console.log('search')", encoding="utf-8")
+
+    (output_dir / "search-index.js").write_text("window.__SEARCH_INDEX_PAYLOAD__ = {};", encoding="utf-8")
+    (output_dir / "search-index.json").write_text('{"items":[]}', encoding="utf-8")
+    (output_dir / "search-index-0000.js").write_text(
+        "window.__SEARCH_INDEX_SHARDS__ = {};",
+        encoding="utf-8",
+    )
+
+    staging_dir = tmp_path / "stage"
+    staging_dir.mkdir()
+    files, _index_target, _ = stage_gist_files(
+        output_dir,
+        include_json=False,
+        index_filename="session-abc.html",
+        staging_dir=staging_dir,
+    )
+
+    assert (staging_dir / "assets" / "base.css").exists()
+    assert (staging_dir / "assets" / "theme.css").exists()
+    assert (staging_dir / "assets" / "runtime.js").exists()
+    assert (staging_dir / "assets" / "search.js").exists()
+    assert (staging_dir / "search-index.js").exists()
+    assert (staging_dir / "search-index.json").exists()
+    assert (staging_dir / "search-index-0000.js").exists()
+    assert any(path.name == "search-index.js" for path in files)
