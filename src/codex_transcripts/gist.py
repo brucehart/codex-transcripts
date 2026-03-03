@@ -91,6 +91,7 @@ def stage_gist_files(
     staging_dir: str | Path | None = None,
 ):
     output_dir = Path(output_dir)
+    assets_dir = output_dir / "assets"
     html_files = sorted(output_dir.glob("*.html"))
     if not html_files:
         raise click.ClickException(f"No transcript files found in {output_dir}")
@@ -122,6 +123,23 @@ def stage_gist_files(
             target = staging_dir / json_file.name
             shutil.copy(json_file, target)
             staged_files.append(target)
+
+    if assets_dir.exists() and assets_dir.is_dir():
+        staged_assets_dir = staging_dir / "assets"
+        shutil.copytree(assets_dir, staged_assets_dir, dirs_exist_ok=True)
+        for asset_file in sorted(staged_assets_dir.rglob("*")):
+            if asset_file.is_file():
+                staged_files.append(asset_file)
+
+    for artifact in sorted(output_dir.glob("search-index*.js")):
+        target = staging_dir / artifact.name
+        shutil.copy2(artifact, target)
+        staged_files.append(target)
+
+    for artifact in sorted(output_dir.glob("search-index*.json")):
+        target = staging_dir / artifact.name
+        shutil.copy2(artifact, target)
+        staged_files.append(target)
 
     inject_gist_preview_js(staging_dir)
 

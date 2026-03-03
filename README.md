@@ -81,6 +81,7 @@ codex-transcripts diff ~/.codex/sessions/.../run-a.jsonl ~/.codex/sessions/.../r
 - `--redact` - enable default redaction presets (`emails`, `tokens`)
 - `--redact-preset PRESET` - apply preset redaction patterns (`emails`, `tokens`, `paths`, `hostnames`; repeatable)
 - `--redact-pattern REGEX` - apply custom regex redaction (repeatable)
+- `--strict-rows` - fail on malformed JSON rows instead of skipping them with warnings
 - `--gist` - create a GitHub gist from the generated HTML and output a preview URL (requires the `gh` CLI)
 - `--gist-public` - create a public gist instead of a secret gist
 
@@ -92,6 +93,7 @@ For large archives, `all` additionally supports:
 
 - `--skip-bad-files / --no-skip-bad-files` - skip malformed session files during scan (default: skip)
 - `--strict` - fail immediately on parse/render errors
+- `--strict-rows` - fail parsing individual session files when malformed JSON rows are encountered
 - `--incremental` - skip unchanged sessions using a cache file in the archive output directory
 - `--workers N` - parallelize session rendering
 - `--theme ...`, `--markdown`, `--txt`, `--pdf`, `--stats-json`
