@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import html
 import json
+import re
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Sequence
 
 import bleach
 from jinja2 import Environment, PackageLoader
@@ -18,6 +20,10 @@ from .parser import Entry, SessionData, parse_session_file
 
 PROMPTS_PER_PAGE = 5
 LONG_TEXT_THRESHOLD = 300
+AUTO_INLINE_SEARCH_ITEM_THRESHOLD = 400
+SEARCH_MODES = {"inline", "external", "auto"}
+SearchMode = Literal["inline", "external", "auto"]
+REDACTION_PLACEHOLDER = "[REDACTED]"
 
 
 _jinja_env = Environment(
@@ -475,11 +481,91 @@ def _sanitize_search_text(text: str) -> str:
     return bleach.clean(text, tags=[], attributes={}, strip=True)
 
 
-def generate_html(json_path: str | Path, output_dir: str | Path, include_json: bool = False):
+def _compile_redaction_patterns(patterns: Sequence[str]) -> list[re.Pattern[str]]:
+    compiled: list[re.Pattern[str]] = []
+    for pattern in patterns:
+        try:
+            compiled.append(re.compile(pattern))
+        except re.error as exc:
+            raise ValueError(f"Invalid redaction pattern `{pattern}`: {exc}") from exc
+    return compiled
+
+
+def _redact_text(text: str, patterns: Sequence[re.Pattern[str]]) -> str:
+    redacted = text
+    for pattern in patterns:
+        redacted = pattern.sub(REDACTION_PLACEHOLDER, redacted)
+    return redacted
+
+
+def _redact_value(value: Any, patterns: Sequence[re.Pattern[str]]) -> Any:
+    if isinstance(value, str):
+        return _redact_text(value, patterns)
+    if isinstance(value, list):
+        return [_redact_value(item, patterns) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_value(item, patterns) for key, item in value.items()}
+    return value
+
+
+def _redact_session(session: SessionData, patterns: Sequence[re.Pattern[str]]) -> SessionData:
+    if not patterns:
+        return session
+
+    redacted_entries: list[Entry] = []
+    for entry in session.entries:
+        redacted_entries.append(
+            replace(
+                entry,
+                content=_redact_text(entry.content, patterns) if entry.content else entry.content,
+                tool_input=_redact_value(entry.tool_input, patterns),
+                tool_output=_redact_value(entry.tool_output, patterns),
+            )
+        )
+
+    return replace(
+        session,
+        cwd=_redact_text(session.cwd, patterns) if session.cwd else session.cwd,
+        instructions=(
+            _redact_text(session.instructions, patterns)
+            if session.instructions
+            else session.instructions
+        ),
+        entries=redacted_entries,
+    )
+
+
+def _select_inline_search_index(
+    search_mode: SearchMode,
+    search_index_data: dict[str, Any],
+) -> dict[str, Any] | None:
+    if search_mode == "inline":
+        return search_index_data
+    if search_mode == "external":
+        return None
+    items = search_index_data.get("items", [])
+    if isinstance(items, list) and len(items) <= AUTO_INLINE_SEARCH_ITEM_THRESHOLD:
+        return search_index_data
+    return None
+
+
+def generate_html_from_session(
+    session: SessionData,
+    output_dir: str | Path,
+    *,
+    source_path: str | Path | None = None,
+    include_json: bool = False,
+    search_mode: SearchMode = "auto",
+    redact_patterns: Sequence[str] | None = None,
+):
+    if search_mode not in SEARCH_MODES:
+        raise ValueError(f"Invalid search_mode: {search_mode}")
+
+    if redact_patterns:
+        session = _redact_session(session, _compile_redaction_patterns(redact_patterns))
+
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True, parents=True)
-
-    session = parse_session_file(json_path)
 
     git = session.git or {}
     repo_url = git.get("repository_url") if isinstance(git, dict) else None
@@ -606,6 +692,7 @@ def generate_html(json_path: str | Path, output_dir: str | Path, include_json: b
         "total_pages": total_pages,
         "items": search_items,
     }
+    inline_search_index = _select_inline_search_index(search_mode, search_index_data)
 
     index_pagination = _macros.index_pagination(total_pages)
     index_template = get_template("index.html")
@@ -621,7 +708,7 @@ def generate_html(json_path: str | Path, output_dir: str | Path, include_json: b
         index_items_html="".join(index_items),
         session_meta_html=session_meta_html,
         system_instructions_html=instructions_html,
-        search_index_data=search_index_data,
+        inline_search_index=inline_search_index,
     )
     index_path = output_dir / "index.html"
     index_path.write_text(index_content, encoding="utf-8")
@@ -631,7 +718,27 @@ def generate_html(json_path: str | Path, output_dir: str | Path, include_json: b
         encoding="utf-8",
     )
 
-    if include_json:
-        shutil.copy(json_path, output_dir / Path(json_path).name)
+    if include_json and source_path:
+        source_path = Path(source_path)
+        if source_path.exists():
+            shutil.copy(source_path, output_dir / source_path.name)
 
     return index_path
+
+
+def generate_html(
+    json_path: str | Path,
+    output_dir: str | Path,
+    include_json: bool = False,
+    search_mode: SearchMode = "auto",
+    redact_patterns: Sequence[str] | None = None,
+):
+    session = parse_session_file(json_path)
+    return generate_html_from_session(
+        session,
+        output_dir,
+        source_path=json_path,
+        include_json=include_json,
+        search_mode=search_mode,
+        redact_patterns=redact_patterns,
+    )

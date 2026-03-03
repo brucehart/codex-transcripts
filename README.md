@@ -64,10 +64,22 @@ All commands support:
 - `-a, --output-auto` - auto-name a subdirectory based on the session filename
 - `--open` - open the generated `index.html` in your default browser
 - `--json` - include the source JSONL file in the output directory
+- `--search-mode inline|external|auto` - control whether search data is embedded inline or loaded from `search-index.json`
+- `--redact basic` - apply built-in redaction rules before rendering
+- `--redact-pattern REGEX` - apply custom regex redaction (repeatable)
 - `--gist` - create a GitHub gist from the generated HTML and output a preview URL (requires the `gh` CLI)
 - `--gist-public` - create a public gist instead of a secret gist
 
 Generated outputs now also include `search-index.json`, which powers fast transcript search.
+
+### Archive reliability and scale options
+
+For large archives, `all` additionally supports:
+
+- `--skip-bad-files / --no-skip-bad-files` - skip malformed session files during scan (default: skip)
+- `--strict` - fail immediately on parse/render errors
+- `--incremental` - skip unchanged sessions using a cache file in the archive output directory
+- `--workers N` - parallelize session rendering
 
 ### Serve local output over HTTP
 
@@ -86,5 +98,5 @@ If no browser is available, the CLI prints a `file://` URL you can open locally 
 Run tests with:
 
 ```bash
-uv run pytest
+uv run python -m pytest
 ```

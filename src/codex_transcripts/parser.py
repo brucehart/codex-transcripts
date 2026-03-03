@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 import json
 import re
 from pathlib import Path
 from typing import Any
+
+
+MESSAGE_DEDUP_WINDOW = 8
 
 
 @dataclass
@@ -85,6 +89,10 @@ def is_instruction_repeat(message_text: str | None, instructions_text: str | Non
     )
 
 
+def _message_dedup_key(role: str | None, content_text: str) -> tuple[str, str]:
+    return ((role or "").strip().lower(), normalize_text_for_match(content_text))
+
+
 def _normalize_user_content(
     role: str | None, content_text: str, instructions: str | None
 ) -> str:
@@ -158,7 +166,25 @@ def parse_session_file(filepath: str | Path) -> SessionData:
     instructions: str | None = None
     instruction_repeats = 0
     tool_name_by_call_id: dict[str, str | None] = {}
-    seen_messages: set[tuple[str, str, str | None]] = set()
+    recent_message_keys: deque[tuple[str, str]] = deque(maxlen=MESSAGE_DEDUP_WINDOW)
+    recent_message_set: set[tuple[str, str]] = set()
+    valid_row_count = 0
+
+    def should_append_message(role: str | None, content_text: str) -> bool:
+        key = _message_dedup_key(role, content_text)
+        if key in recent_message_set:
+            return False
+
+        if (
+            recent_message_keys.maxlen is not None
+            and len(recent_message_keys) >= recent_message_keys.maxlen
+        ):
+            old_key = recent_message_keys.popleft()
+            recent_message_set.discard(old_key)
+
+        recent_message_keys.append(key)
+        recent_message_set.add(key)
+        return True
 
     with open(filepath, "r", encoding="utf-8") as f:
         for line in f:
@@ -169,6 +195,7 @@ def parse_session_file(filepath: str | Path) -> SessionData:
                 obj = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            valid_row_count += 1
 
             obj_type = obj.get("type")
             timestamp = obj.get("timestamp")
@@ -194,9 +221,7 @@ def parse_session_file(filepath: str | Path) -> SessionData:
                     role = payload.get("role")
                     content_text = extract_text_from_content(payload.get("content", []))
                     content_text = _normalize_user_content(role, content_text, instructions)
-                    if content_text:
-                        key = (str(role), content_text, timestamp)
-                        seen_messages.add(key)
+                    if content_text and should_append_message(str(role), content_text):
                         _append_message(entries, timestamp, str(role), content_text)
                     if not cwd:
                         cwd = extract_cwd_from_text(content_text) or cwd
@@ -232,13 +257,11 @@ def parse_session_file(filepath: str | Path) -> SessionData:
                 if payload_type == "user_message":
                     content_text = payload.get("message", "")
                     content_text = _normalize_user_content("user", content_text, instructions)
-                    key = ("user", content_text, timestamp)
-                    if content_text and key not in seen_messages:
+                    if content_text and should_append_message("user", content_text):
                         _append_message(entries, timestamp, "user", content_text)
                 elif payload_type == "agent_message":
                     content_text = payload.get("message", "")
-                    key = ("assistant", content_text, timestamp)
-                    if content_text and key not in seen_messages:
+                    if content_text and should_append_message("assistant", content_text):
                         _append_message(entries, timestamp, "assistant", content_text)
                 continue
 
@@ -262,7 +285,7 @@ def parse_session_file(filepath: str | Path) -> SessionData:
                 role = obj.get("role")
                 content_text = extract_text_from_content(obj.get("content", []))
                 content_text = _normalize_user_content(role, content_text, instructions)
-                if content_text:
+                if content_text and should_append_message(str(role), content_text):
                     _append_message(entries, timestamp, str(role), content_text)
                 if not cwd:
                     cwd = extract_cwd_from_text(content_text) or cwd
@@ -285,6 +308,9 @@ def parse_session_file(filepath: str | Path) -> SessionData:
         instruction_repeats = 0
     elif instruction_repeats == 0:
         instruction_repeats = 1
+
+    if valid_row_count == 0:
+        raise ValueError(f"No valid JSON rows in session file: {filepath}")
 
     return SessionData(
         session_id=session_id,

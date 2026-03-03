@@ -4,8 +4,12 @@
 
 {% block content %}
         <h1><a href="../index.html" style="color: inherit; text-decoration: none;">Codex Archive</a> / {{ project_name }}</h1>
-        <p style="color: var(--text-muted); margin-bottom: 24px;">{{ session_count }} session{% if session_count != 1 %}s{% endif %}</p>
+        <p style="color: var(--text-muted); margin-bottom: 24px;">
+            {{ session_count }} rendered session{% if session_count != 1 %}s{% endif %}
+            {% if failed_count %}| {{ failed_count }} failed{% endif %}
+        </p>
 
+        {% if sessions %}
         {% for session in sessions %}
         <div class="index-item">
             <a href="{{ session.name }}/index.html">
@@ -19,6 +23,23 @@
             </a>
         </div>
         {% endfor %}
+        {% else %}
+        <p style="color: var(--text-muted);">No rendered sessions for this project yet.</p>
+        {% endif %}
+
+        {% if failed_sessions %}
+        <h2 style="font-size: 1.1rem; margin-top: 24px;">Failed Sessions</h2>
+        {% for failure in failed_sessions %}
+        <div class="index-item" style="background: #ffebee; border-left-color: #e53935;">
+            <div class="index-item-header">
+                <span class="index-item-number">{{ failure.name }}</span>
+            </div>
+            <div class="index-item-content">
+                <p style="margin: 0; color: #b71c1c;">{{ failure.error }}</p>
+            </div>
+        </div>
+        {% endfor %}
+        {% endif %}
 
         <div style="margin-top: 24px;">
             <a href="../index.html" class="pagination" style="display: inline-block; padding: 8px 16px; background: var(--user-border); color: white; text-decoration: none; border-radius: 6px;">Back to Archive</a>

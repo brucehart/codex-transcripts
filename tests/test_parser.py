@@ -51,6 +51,28 @@ def test_event_msg_duplicate_user_message_is_suppressed(tmp_path):
     assert len(user_messages) == 1
 
 
+def test_event_msg_duplicate_user_message_with_different_timestamp_is_suppressed(tmp_path):
+    session_file = tmp_path / "session.jsonl"
+    session_file.write_text(
+        "\n".join(
+            [
+                '{"timestamp":"2025-01-01T00:00:00Z","type":"session_meta","payload":{"id":"abc123","timestamp":"2025-01-01T00:00:00Z"}}',
+                '{"timestamp":"2025-01-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Hello"}]}}',
+                '{"timestamp":"2025-01-01T00:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"Hello"}}',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    session = parse_session_file(session_file)
+    user_messages = [
+        entry
+        for entry in session.entries
+        if entry.entry_type == "message" and entry.role == "user"
+    ]
+    assert len(user_messages) == 1
+
+
 def test_legacy_format_is_still_supported(tmp_path):
     session_file = tmp_path / "legacy.jsonl"
     session_file.write_text(

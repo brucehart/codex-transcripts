@@ -4,7 +4,10 @@
 
 {% block content %}
         <h1>Codex Archive</h1>
-        <p style="color: var(--text-muted); margin-bottom: 24px;">{{ total_projects }} projects | {{ total_sessions }} sessions</p>
+        <p style="color: var(--text-muted); margin-bottom: 24px;">
+            {{ total_projects }} projects | {{ total_sessions }} rendered sessions
+            {% if total_failed_sessions %}| {{ total_failed_sessions }} failed{% endif %}
+        </p>
 
         {% for project in projects %}
         <div class="index-item">
@@ -14,7 +17,10 @@
                     <time>{{ project.recent_date }}</time>
                 </div>
                 <div class="index-item-content">
-                    <p style="margin: 0;">{{ project.session_count }} session{% if project.session_count != 1 %}s{% endif %}</p>
+                    <p style="margin: 0;">
+                        {{ project.session_count }} rendered session{% if project.session_count != 1 %}s{% endif %}
+                        {% if project.failed_count %}| {{ project.failed_count }} failed{% endif %}
+                    </p>
                 </div>
             </a>
         </div>

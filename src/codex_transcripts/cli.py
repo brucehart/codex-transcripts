@@ -14,7 +14,6 @@ import questionary
 
 from .archive import (
     build_local_session_label,
-    find_all_sessions,
     find_local_session_records,
     generate_batch_html,
 )
@@ -26,6 +25,35 @@ from .gist import (
 )
 from .parser import parse_session_file
 from .renderer import generate_html
+
+REDACTION_PRESETS: dict[str, tuple[str, ...]] = {
+    "basic": (
+        r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+        r"\b(?:ghp|github_pat)_[A-Za-z0-9_]{20,}\b",
+        r"\bsk-[A-Za-z0-9]{20,}\b",
+    ),
+}
+
+
+def resolve_redaction_patterns(
+    redact_presets: tuple[str, ...],
+    redact_patterns: tuple[str, ...],
+) -> tuple[str, ...]:
+    resolved: list[str] = []
+    seen: set[str] = set()
+
+    for preset in redact_presets:
+        for pattern in REDACTION_PRESETS.get(preset.lower(), ()):
+            if pattern not in seen:
+                seen.add(pattern)
+                resolved.append(pattern)
+
+    for pattern in redact_patterns:
+        if pattern not in seen:
+            seen.add(pattern)
+            resolved.append(pattern)
+
+    return tuple(resolved)
 
 
 @click.group(cls=DefaultGroup, default="local", default_if_no_args=True)
@@ -72,6 +100,26 @@ def cli():
     help="Open the generated index.html in your default browser (default if no -o specified).",
 )
 @click.option(
+    "--search-mode",
+    type=click.Choice(["inline", "external", "auto"], case_sensitive=False),
+    default="auto",
+    show_default=True,
+    help="How to embed transcript search data in index.html.",
+)
+@click.option(
+    "--redact",
+    "redact_presets",
+    type=click.Choice(sorted(REDACTION_PRESETS.keys()), case_sensitive=False),
+    multiple=True,
+    help="Apply a built-in redaction preset before rendering.",
+)
+@click.option(
+    "--redact-pattern",
+    "redact_patterns",
+    multiple=True,
+    help="Regex pattern to redact from rendered output. Repeatable.",
+)
+@click.option(
     "--limit",
     default=10,
     help="Maximum number of sessions to show (default: 10)",
@@ -83,6 +131,9 @@ def local_cmd(
     create_gist,
     gist_public,
     open_browser,
+    search_mode,
+    redact_presets,
+    redact_patterns,
     limit,
 ):
     """Select and convert a local Codex session to HTML."""
@@ -131,7 +182,17 @@ def local_cmd(
         output = Path(tempfile.gettempdir()) / f"codex-session-{session_file.stem}"
 
     output = Path(output)
-    index_path = generate_html(session_file, output, include_json=include_json)
+    resolved_redaction_patterns = resolve_redaction_patterns(
+        redact_presets,
+        redact_patterns,
+    )
+    index_path = generate_html(
+        session_file,
+        output,
+        include_json=include_json,
+        search_mode=search_mode.lower(),
+        redact_patterns=resolved_redaction_patterns,
+    )
 
     click.echo(f"Output: {output.resolve()}")
 
@@ -197,6 +258,26 @@ def local_cmd(
     is_flag=True,
     help="Open the generated index.html in your default browser (default if no -o specified).",
 )
+@click.option(
+    "--search-mode",
+    type=click.Choice(["inline", "external", "auto"], case_sensitive=False),
+    default="auto",
+    show_default=True,
+    help="How to embed transcript search data in index.html.",
+)
+@click.option(
+    "--redact",
+    "redact_presets",
+    type=click.Choice(sorted(REDACTION_PRESETS.keys()), case_sensitive=False),
+    multiple=True,
+    help="Apply a built-in redaction preset before rendering.",
+)
+@click.option(
+    "--redact-pattern",
+    "redact_patterns",
+    multiple=True,
+    help="Regex pattern to redact from rendered output. Repeatable.",
+)
 def json_cmd(
     json_file,
     output,
@@ -205,6 +286,9 @@ def json_cmd(
     create_gist,
     gist_public,
     open_browser,
+    search_mode,
+    redact_presets,
+    redact_patterns,
 ):
     """Convert a Codex session JSONL file to HTML."""
     auto_open = output is None and not output_auto
@@ -215,7 +299,17 @@ def json_cmd(
         output = Path(tempfile.gettempdir()) / f"codex-session-{Path(json_file).stem}"
 
     output = Path(output)
-    index_path = generate_html(json_file, output, include_json=include_json)
+    resolved_redaction_patterns = resolve_redaction_patterns(
+        redact_presets,
+        redact_patterns,
+    )
+    index_path = generate_html(
+        json_file,
+        output,
+        include_json=include_json,
+        search_mode=search_mode.lower(),
+        redact_patterns=resolved_redaction_patterns,
+    )
 
     click.echo(f"Output: {output.resolve()}")
 
@@ -274,7 +368,63 @@ def json_cmd(
     is_flag=True,
     help="Suppress all output except errors.",
 )
-def all_cmd(source, output, include_json, open_browser, quiet):
+@click.option(
+    "--skip-bad-files/--no-skip-bad-files",
+    default=True,
+    show_default=True,
+    help="Skip malformed session files during archive scanning.",
+)
+@click.option(
+    "--strict",
+    is_flag=True,
+    help="Fail immediately on parse/render errors.",
+)
+@click.option(
+    "--incremental",
+    is_flag=True,
+    help="Skip unchanged sessions when output already exists.",
+)
+@click.option(
+    "--workers",
+    type=click.IntRange(min=1),
+    default=1,
+    show_default=True,
+    help="Number of parallel render workers.",
+)
+@click.option(
+    "--search-mode",
+    type=click.Choice(["inline", "external", "auto"], case_sensitive=False),
+    default="auto",
+    show_default=True,
+    help="How to embed transcript search data in index.html.",
+)
+@click.option(
+    "--redact",
+    "redact_presets",
+    type=click.Choice(sorted(REDACTION_PRESETS.keys()), case_sensitive=False),
+    multiple=True,
+    help="Apply a built-in redaction preset before rendering.",
+)
+@click.option(
+    "--redact-pattern",
+    "redact_patterns",
+    multiple=True,
+    help="Regex pattern to redact from rendered output. Repeatable.",
+)
+def all_cmd(
+    source,
+    output,
+    include_json,
+    open_browser,
+    quiet,
+    skip_bad_files,
+    strict,
+    incremental,
+    workers,
+    search_mode,
+    redact_presets,
+    redact_patterns,
+):
     """Convert all local Codex sessions to a browsable HTML archive."""
     if source is None:
         source = Path.home() / ".codex" / "sessions"
@@ -289,28 +439,39 @@ def all_cmd(source, output, include_json, open_browser, quiet):
     if not quiet:
         click.echo(f"Scanning {source}...")
 
-    projects = find_all_sessions(source)
-
-    if not projects:
-        if not quiet:
-            click.echo("No sessions found.")
-        return
-
-    total_sessions = sum(len(p["sessions"]) for p in projects)
-
-    if not quiet:
-        click.echo(f"Found {len(projects)} projects with {total_sessions} sessions")
-
     def on_progress(_project_name, _session_name, current, total):
         if not quiet and current % 10 == 0:
             click.echo(f"  Processed {current}/{total} sessions...")
 
-    stats = generate_batch_html(
-        source,
-        output,
-        include_json=include_json,
-        progress_callback=on_progress,
-    )
+    try:
+        resolved_redaction_patterns = resolve_redaction_patterns(
+            redact_presets,
+            redact_patterns,
+        )
+        stats = generate_batch_html(
+            source,
+            output,
+            include_json=include_json,
+            progress_callback=on_progress,
+            skip_bad_files=skip_bad_files,
+            strict=strict,
+            incremental=incremental,
+            workers=workers,
+            search_mode=search_mode.lower(),
+            redact_patterns=resolved_redaction_patterns,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if not stats["total_sessions"] and not stats["failed_sessions"] and not stats["scan_failures"]:
+        if not quiet:
+            click.echo("No sessions found.")
+        return
+
+    if stats["scan_failures"]:
+        click.echo(f"\nWarning: {len(stats['scan_failures'])} session file(s) failed to parse:")
+        for failure in stats["scan_failures"]:
+            click.echo(f"  {failure['path']}: {failure['error']}")
 
     if stats["failed_sessions"]:
         click.echo(f"\nWarning: {len(stats['failed_sessions'])} session(s) failed:")
@@ -322,6 +483,8 @@ def all_cmd(source, output, include_json, open_browser, quiet):
             f"\nGenerated archive with {stats['total_projects']} projects, "
             f"{stats['total_sessions']} sessions"
         )
+        if stats["skipped_sessions"]:
+            click.echo(f"Skipped unchanged sessions: {stats['skipped_sessions']}")
         click.echo(f"Output: {output.resolve()}")
 
     if open_browser:

@@ -105,3 +105,47 @@ def test_generate_html_repo_context_does_not_leak_between_runs(tmp_path):
     assert "https://github.com/one/repo/commit/abcdef1" in first_content
     assert "https://github.com/two/repo/commit/deadbee" in second_content
     assert "https://github.com/two/repo/commit/deadbee" not in first_content
+
+
+def test_generate_html_external_search_mode_does_not_inline_index(tmp_path):
+    session_file = tmp_path / "session.jsonl"
+    _write_session(
+        session_file,
+        repo_url="https://github.com/example/repo",
+        commit_hash="abcdef1",
+        commit_message="first commit",
+        user_text="Searchable user text",
+    )
+
+    output_dir = tmp_path / "output"
+    generate_html(session_file, output_dir, search_mode="external")
+
+    index_content = (output_dir / "index.html").read_text(encoding="utf-8")
+    assert "window.__SEARCH_INDEX__ = null;" in index_content
+    assert (output_dir / "search-index.json").exists()
+
+
+def test_generate_html_applies_redaction_patterns(tmp_path):
+    session_file = tmp_path / "session.jsonl"
+    _write_session(
+        session_file,
+        repo_url="https://github.com/example/repo",
+        commit_hash="abcdef1",
+        commit_message="first commit",
+        user_text="Contact me at user@example.com",
+    )
+
+    output_dir = tmp_path / "output"
+    generate_html(
+        session_file,
+        output_dir,
+        redact_patterns=(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",),
+    )
+
+    page_content = (output_dir / "page-001.html").read_text(encoding="utf-8")
+    index_content = (output_dir / "index.html").read_text(encoding="utf-8")
+    search_content = (output_dir / "search-index.json").read_text(encoding="utf-8")
+
+    for content in (page_content, index_content, search_content):
+        assert "user@example.com" not in content
+        assert "[REDACTED]" in content

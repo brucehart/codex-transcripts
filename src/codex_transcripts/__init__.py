@@ -8,6 +8,7 @@ from .archive import (
     generate_batch_html,
     get_session_summary,
     resolve_project_key,
+    scan_all_sessions,
 )
 from .cli import cli
 from .common import extract_github_repo, format_session_timestamp, open_or_print_url, slugify
@@ -24,7 +25,9 @@ from .parser import Entry, SessionData, get_session_summary_from_session, parse_
 from .renderer import (
     CSS,
     JS,
+    SearchMode,
     generate_html,
+    generate_html_from_session,
     get_template,
     make_msg_id,
     render_markdown_text,
@@ -40,6 +43,7 @@ __all__ = [
     "CSS",
     "Entry",
     "JS",
+    "SearchMode",
     "SessionData",
     "build_gist_description",
     "build_gist_index_filename",
@@ -55,6 +59,7 @@ __all__ = [
     "format_session_timestamp",
     "generate_batch_html",
     "generate_html",
+    "generate_html_from_session",
     "get_session_summary",
     "get_session_summary_from_session",
     "get_template",
@@ -66,6 +71,7 @@ __all__ = [
     "render_markdown_text",
     "resolve_project_key",
     "sanitize_html",
+    "scan_all_sessions",
     "slugify",
     "stage_gist_files",
 ]
