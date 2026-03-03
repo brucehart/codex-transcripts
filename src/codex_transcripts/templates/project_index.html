@@ -9,9 +9,41 @@
             {% if failed_count %}| {{ failed_count }} failed{% endif %}
         </p>
 
+        <div class="archive-filters">
+            <label>Date from
+                <input type="date" id="filter-from-date">
+            </label>
+            <label>Date to
+                <input type="date" id="filter-to-date">
+            </label>
+            <label>Tool name
+                <input type="text" id="filter-tool" placeholder="shell">
+            </label>
+            <label>Repo
+                <input type="text" id="filter-repo" placeholder="example/repo">
+            </label>
+            <label>Branch
+                <input type="text" id="filter-branch" placeholder="main">
+            </label>
+            <label class="checkbox-label">
+                <input type="checkbox" id="filter-error-only">
+                Error turns only
+            </label>
+            <div class="actions">
+                <button id="filter-reset-btn" type="button" class="secondary">Reset</button>
+            </div>
+        </div>
+        <p id="filter-result-count" class="archive-filter-count"></p>
+
         {% if sessions %}
+        <div data-archive-filter-root>
         {% for session in sessions %}
-        <div class="index-item">
+        <div class="index-item archive-session-item"
+             data-date="{{ session.date_iso }}"
+             data-tools="{{ session.tools_csv }}"
+             data-error-turns="{{ session.error_turns }}"
+             data-repo="{{ session.repo }}"
+             data-branch="{{ session.branch }}">
             <a href="{{ session.name }}/index.html">
                 <div class="index-item-header">
                     <span class="index-item-number">{{ session.date }}</span>
@@ -19,10 +51,16 @@
                 </div>
                 <div class="index-item-content">
                     <p style="margin: 0;">{{ session.summary[:100] }}{% if session.summary|length > 100 %}...{% endif %}</p>
+                    <p style="margin: 8px 0 0; color: var(--text-muted); font-size: 0.85rem;">
+                        {{ session.repo or "unknown repo" }} | {{ session.branch or "unknown branch" }}
+                        {% if session.tool_count %}| {{ session.tool_count }} tool{{ "s" if session.tool_count != 1 else "" }}{% endif %}
+                        {% if session.error_turns %}| {{ session.error_turns }} error turn{{ "s" if session.error_turns != 1 else "" }}{% endif %}
+                    </p>
                 </div>
             </a>
         </div>
         {% endfor %}
+        </div>
         {% else %}
         <p style="color: var(--text-muted);">No rendered sessions for this project yet.</p>
         {% endif %}
@@ -44,4 +82,5 @@
         <div style="margin-top: 24px;">
             <a href="../index.html" class="pagination" style="display: inline-block; padding: 8px 16px; background: var(--user-border); color: white; text-decoration: none; border-radius: 6px;">Back to Archive</a>
         </div>
+        <script src="assets/archive-filters.js"></script>
 {%- endblock %}

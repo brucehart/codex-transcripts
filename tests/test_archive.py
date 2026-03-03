@@ -89,3 +89,15 @@ def test_generate_batch_html_incremental_skips_unchanged_sessions(tmp_path, monk
     assert second_stats["total_sessions"] == 1
     assert second_stats["skipped_sessions"] == 1
     assert second_stats["failed_sessions"] == []
+
+
+def test_generate_batch_html_master_index_contains_filter_controls(tmp_path):
+    sessions_dir = tmp_path / "sessions"
+    write_fixture(sessions_dir / "2025" / "12" / "24" / "run-a.jsonl")
+
+    output_dir = tmp_path / "archive"
+    generate_batch_html(sessions_dir, output_dir)
+
+    master_index = (output_dir / "index.html").read_text(encoding="utf-8")
+    assert "filter-tool" in master_index
+    assert "archive-session-item" in master_index

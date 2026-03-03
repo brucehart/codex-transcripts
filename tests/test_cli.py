@@ -104,3 +104,48 @@ def test_cli_help_lists_serve_command():
     result = runner.invoke(cli, ["--help"])
     assert result.exit_code == 0, result.output
     assert "serve" in result.output
+
+
+def test_json_cli_writes_exports_and_stats(tmp_path):
+    output_dir = tmp_path / "output"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "json",
+            str(FIXTURE),
+            "-o",
+            str(output_dir),
+            "--markdown",
+            "--txt",
+            "--stats-json",
+            "--theme",
+            "compact",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (output_dir / "index.html").exists()
+    assert (output_dir / "transcript.md").exists()
+    assert (output_dir / "transcript.txt").exists()
+    assert (output_dir / "stats.json").exists()
+    assert (output_dir / "assets" / "theme.css").exists()
+
+
+def test_diff_cli_generates_report(tmp_path):
+    output_dir = tmp_path / "diff"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "diff",
+            str(FIXTURE),
+            str(FIXTURE),
+            "-o",
+            str(output_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (output_dir / "index.html").exists()
+    assert (output_dir / "diff.json").exists()

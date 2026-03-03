@@ -33,6 +33,8 @@ from .renderer import (
     render_markdown_text,
     sanitize_html,
 )
+from .session_diff import build_session_diff, generate_diff_report
+from .stats import build_stats_report, collect_session_metrics, write_stats_report
 
 
 def main() -> None:
@@ -48,8 +50,11 @@ __all__ = [
     "build_gist_description",
     "build_gist_index_filename",
     "build_gist_label",
+    "build_session_diff",
+    "build_stats_report",
     "build_local_session_label",
     "cli",
+    "collect_session_metrics",
     "create_gist_from_output",
     "extract_gist_id",
     "extract_github_repo",
@@ -74,4 +79,6 @@ __all__ = [
     "scan_all_sessions",
     "slugify",
     "stage_gist_files",
+    "generate_diff_report",
+    "write_stats_report",
 ]

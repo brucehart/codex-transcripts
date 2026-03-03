@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+
+{% block title %}Session Diff - Codex transcript{% endblock %}
+
+{% block content %}
+        <h1>Session Diff</h1>
+
+        <div class="session-meta">
+            <div class="meta-item"><span class="meta-label">A: session</span>{{ diff.session_a.meta.session_id }}</div>
+            <div class="meta-item"><span class="meta-label">B: session</span>{{ diff.session_b.meta.session_id }}</div>
+            <div class="meta-item"><span class="meta-label">A: source</span>{{ diff.session_a.source }}</div>
+            <div class="meta-item"><span class="meta-label">B: source</span>{{ diff.session_b.source }}</div>
+            <div class="meta-item"><span class="meta-label">Repo</span>{{ diff.session_a.meta.repo or diff.session_b.meta.repo or "unknown" }}</div>
+            <div class="meta-item"><span class="meta-label">Branch</span>{{ diff.session_a.meta.branch or diff.session_b.meta.branch or "unknown" }}</div>
+        </div>
+
+        <p style="color: var(--text-muted); margin-bottom: 16px;">
+            Prompts: {{ diff.summary.prompt_count_a }} -> {{ diff.summary.prompt_count_b }} ({{ diff.summary.prompt_changes }} changed blocks)
+            | Tool calls: {{ diff.summary.tool_call_count_a }} -> {{ diff.summary.tool_call_count_b }} ({{ diff.summary.tool_call_changes }} changed blocks)
+        </p>
+
+        <h2>Prompt Changes</h2>
+        {% if diff.prompt_blocks %}
+        {% for block in diff.prompt_blocks %}
+        <div class="index-item">
+            <div class="index-item-header">
+                <span class="index-item-number">{{ block.left_range }} -> {{ block.right_range }}</span>
+                <span class="diff-tag {{ block.tag }}">{{ block.tag }}</span>
+            </div>
+            <div class="index-item-content diff-grid">
+                <div class="diff-block">
+                    <div class="diff-tag">Session A</div>
+                    {% if block.left_items %}
+                    {% for item in block.left_items %}
+                    <pre>{{ item }}</pre>
+                    {% endfor %}
+                    {% else %}
+                    <p style="margin: 0; color: var(--text-muted);">(none)</p>
+                    {% endif %}
+                </div>
+                <div class="diff-block">
+                    <div class="diff-tag">Session B</div>
+                    {% if block.right_items %}
+                    {% for item in block.right_items %}
+                    <pre>{{ item }}</pre>
+                    {% endfor %}
+                    {% else %}
+                    <p style="margin: 0; color: var(--text-muted);">(none)</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+        {% else %}
+        <p style="color: var(--text-muted);">No prompt changes.</p>
+        {% endif %}
+
+        <h2>Tool Call Changes</h2>
+        {% if diff.tool_blocks %}
+        {% for block in diff.tool_blocks %}
+        <div class="index-item">
+            <div class="index-item-header">
+                <span class="index-item-number">{{ block.left_range }} -> {{ block.right_range }}</span>
+                <span class="diff-tag {{ block.tag }}">{{ block.tag }}</span>
+            </div>
+            <div class="index-item-content diff-grid">
+                <div class="diff-block">
+                    <div class="diff-tag">Session A</div>
+                    {% if block.left_items %}
+                    {% for item in block.left_items %}
+                    <pre>{{ item }}</pre>
+                    {% endfor %}
+                    {% else %}
+                    <p style="margin: 0; color: var(--text-muted);">(none)</p>
+                    {% endif %}
+                </div>
+                <div class="diff-block">
+                    <div class="diff-tag">Session B</div>
+                    {% if block.right_items %}
+                    {% for item in block.right_items %}
+                    <pre>{{ item }}</pre>
+                    {% endfor %}
+                    {% else %}
+                    <p style="margin: 0; color: var(--text-muted);">(none)</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+        {% else %}
+        <p style="color: var(--text-muted);">No tool call changes.</p>
+        {% endif %}
+{% endblock %}

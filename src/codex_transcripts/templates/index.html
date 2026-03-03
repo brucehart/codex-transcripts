@@ -36,6 +36,8 @@
         </dialog>
         <script>
 window.__SEARCH_INDEX__ = {{ inline_search_index|tojson }};
-{% include "search.js" %}
+window.__SEARCH_CONFIG__ = { totalPages: {{ total_pages }} };
         </script>
+        <script src="search-index.js"></script>
+        <script src="assets/search.js"></script>
 {%- endblock %}

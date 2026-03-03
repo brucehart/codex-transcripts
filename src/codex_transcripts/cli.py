@@ -16,44 +16,97 @@ from .archive import (
     build_local_session_label,
     find_local_session_records,
     generate_batch_html,
+    resolve_project_key,
 )
 from .common import open_or_print_url
+from .exporters import write_transcript_exports
 from .gist import (
     build_gist_description,
     build_gist_index_filename,
     create_gist_from_output,
 )
-from .parser import parse_session_file
-from .renderer import generate_html
-
-REDACTION_PRESETS: dict[str, tuple[str, ...]] = {
-    "basic": (
-        r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
-        r"\b(?:ghp|github_pat)_[A-Za-z0-9_]{20,}\b",
-        r"\bsk-[A-Za-z0-9]{20,}\b",
-    ),
-}
+from .parser import SessionData, parse_session_file
+from .redaction import available_redaction_presets, redact_session_data, resolve_redaction_patterns
+from .renderer import SearchMode, generate_html_from_session
+from .session_diff import generate_diff_report
+from .stats import build_stats_report, collect_session_metrics, write_stats_report
 
 
-def resolve_redaction_patterns(
-    redact_presets: tuple[str, ...],
+def _resolve_output_dir(output: str | None, output_auto: bool, source_stem: str) -> tuple[Path, bool]:
+    auto_open = output is None and not output_auto
+    if output_auto:
+        parent_dir = Path(output) if output else Path(".")
+        resolved_output = parent_dir / source_stem
+    elif output is None:
+        resolved_output = Path(tempfile.gettempdir()) / f"codex-session-{source_stem}"
+    else:
+        resolved_output = Path(output)
+    return resolved_output, auto_open
+
+
+def _resolve_search_mode(search_mode: str) -> SearchMode:
+    normalized = search_mode.lower()
+    if normalized not in {"inline", "external", "auto"}:
+        raise click.ClickException(f"Invalid search mode: {search_mode}")
+    return normalized  # type: ignore[return-value]
+
+
+def _write_stats_if_requested(
+    write_stats: bool,
+    output_dir: Path,
+    sessions: list[dict],
+) -> Path | None:
+    if not write_stats:
+        return None
+    report = build_stats_report(sessions)
+    return write_stats_report(report, output_dir / "stats.json")
+
+
+def _render_single_session_output(
+    *,
+    session: SessionData,
+    source_path: Path,
+    output_dir: Path,
+    include_json: bool,
+    search_mode: SearchMode,
+    theme: str | None,
     redact_patterns: tuple[str, ...],
-) -> tuple[str, ...]:
-    resolved: list[str] = []
-    seen: set[str] = set()
+    markdown_enabled: bool,
+    text_enabled: bool,
+    pdf_enabled: bool,
+    write_stats: bool,
+) -> tuple[Path, Path | None]:
+    session_for_output = (
+        redact_session_data(session, redact_patterns) if redact_patterns else session
+    )
 
-    for preset in redact_presets:
-        for pattern in REDACTION_PRESETS.get(preset.lower(), ()):
-            if pattern not in seen:
-                seen.add(pattern)
-                resolved.append(pattern)
+    index_path = generate_html_from_session(
+        session_for_output,
+        output_dir,
+        source_path=source_path,
+        include_json=include_json,
+        search_mode=search_mode,
+        theme=theme,
+    )
 
-    for pattern in redact_patterns:
-        if pattern not in seen:
-            seen.add(pattern)
-            resolved.append(pattern)
+    if markdown_enabled or text_enabled or pdf_enabled:
+        try:
+            write_transcript_exports(
+                session_for_output,
+                output_dir,
+                markdown_enabled=markdown_enabled,
+                text_enabled=text_enabled,
+                pdf_enabled=pdf_enabled,
+            )
+        except RuntimeError as exc:
+            raise click.ClickException(str(exc)) from exc
 
-    return tuple(resolved)
+    stats_path = _write_stats_if_requested(
+        write_stats,
+        output_dir,
+        [collect_session_metrics(session_for_output, source_path=source_path)],
+    )
+    return index_path, stats_path
 
 
 @click.group(cls=DefaultGroup, default="local", default_if_no_args=True)
@@ -107,17 +160,54 @@ def cli():
     help="How to embed transcript search data in index.html.",
 )
 @click.option(
+    "--theme",
+    type=str,
+    default="default",
+    show_default=True,
+    help="Theme name (`default`, `compact`, `high-contrast`) or custom CSS file path.",
+)
+@click.option(
+    "--markdown",
+    "markdown_enabled",
+    is_flag=True,
+    help="Also export transcript as Markdown (transcript.md).",
+)
+@click.option(
+    "--txt",
+    "text_enabled",
+    is_flag=True,
+    help="Also export transcript as plain text (transcript.txt).",
+)
+@click.option(
+    "--pdf",
+    "pdf_enabled",
+    is_flag=True,
+    help="Also export transcript as PDF (transcript.pdf, requires optional `weasyprint`).",
+)
+@click.option(
+    "--stats-json",
+    "write_stats",
+    is_flag=True,
+    help="Write stats report JSON (`stats.json`).",
+)
+@click.option(
     "--redact",
+    "redact_enabled",
+    is_flag=True,
+    help="Enable built-in redaction defaults (emails + tokens).",
+)
+@click.option(
+    "--redact-preset",
     "redact_presets",
-    type=click.Choice(sorted(REDACTION_PRESETS.keys()), case_sensitive=False),
+    type=click.Choice(available_redaction_presets(), case_sensitive=False),
     multiple=True,
-    help="Apply a built-in redaction preset before rendering.",
+    help="Apply named redaction presets. Repeatable.",
 )
 @click.option(
     "--redact-pattern",
     "redact_patterns",
     multiple=True,
-    help="Regex pattern to redact from rendered output. Repeatable.",
+    help="Regex pattern to redact from rendered/exported output. Repeatable.",
 )
 @click.option(
     "--limit",
@@ -132,13 +222,18 @@ def local_cmd(
     gist_public,
     open_browser,
     search_mode,
+    theme,
+    markdown_enabled,
+    text_enabled,
+    pdf_enabled,
+    write_stats,
+    redact_enabled,
     redact_presets,
     redact_patterns,
     limit,
 ):
     """Select and convert a local Codex session to HTML."""
     sessions_folder = Path.home() / ".codex" / "sessions"
-
     if not sessions_folder.exists():
         click.echo(f"Sessions folder not found: {sessions_folder}")
         click.echo("No local Codex sessions available.")
@@ -146,13 +241,12 @@ def local_cmd(
 
     click.echo("Loading local sessions...")
     records = find_local_session_records(sessions_folder, limit=limit)
-
     if not records:
         click.echo("No local sessions found.")
         return
 
     choices = []
-    record_by_path = {}
+    record_by_path: dict[Path, SessionData] = {}
     for record in records:
         filepath = record.path
         mod_time = datetime.fromtimestamp(record.mtime)
@@ -161,49 +255,45 @@ def local_cmd(
         display_summary = build_local_session_label(record.session, record.summary, max_length=80)
         display = f"{date_str}  {size_kb:5.0f} KB  {display_summary}"
         choices.append(questionary.Choice(title=display, value=filepath))
-        record_by_path[filepath] = record
+        record_by_path[filepath] = record.session
 
-    selected = questionary.select(
-        "Select a session to convert:",
-        choices=choices,
-    ).ask()
-
+    selected = questionary.select("Select a session to convert:", choices=choices).ask()
     if selected is None:
         click.echo("No session selected.")
         return
 
     session_file = Path(selected)
-
-    auto_open = output is None and not output_auto
-    if output_auto:
-        parent_dir = Path(output) if output else Path(".")
-        output = parent_dir / session_file.stem
-    elif output is None:
-        output = Path(tempfile.gettempdir()) / f"codex-session-{session_file.stem}"
-
-    output = Path(output)
+    output_dir, auto_open = _resolve_output_dir(output, output_auto, session_file.stem)
     resolved_redaction_patterns = resolve_redaction_patterns(
+        redact_enabled,
         redact_presets,
         redact_patterns,
     )
-    index_path = generate_html(
-        session_file,
-        output,
+    selected_session = record_by_path.get(session_file) or parse_session_file(session_file)
+    index_path, stats_path = _render_single_session_output(
+        session=selected_session,
+        source_path=session_file,
+        output_dir=output_dir,
         include_json=include_json,
-        search_mode=search_mode.lower(),
+        search_mode=_resolve_search_mode(search_mode),
+        theme=theme,
         redact_patterns=resolved_redaction_patterns,
+        markdown_enabled=markdown_enabled,
+        text_enabled=text_enabled,
+        pdf_enabled=pdf_enabled,
+        write_stats=write_stats,
     )
 
-    click.echo(f"Output: {output.resolve()}")
+    click.echo(f"Output: {output_dir.resolve()}")
+    if stats_path:
+        click.echo(f"Stats: {stats_path.resolve()}")
 
     if create_gist or gist_public:
-        selected_record = record_by_path.get(session_file)
-        session = selected_record.session if selected_record else parse_session_file(session_file)
-        description = build_gist_description(session, session_file)
-        index_filename = build_gist_index_filename(session, session_file)
+        description = build_gist_description(selected_session, session_file)
+        index_filename = build_gist_index_filename(selected_session, session_file)
         click.echo("Creating GitHub gist...")
         gist_url, preview_url = create_gist_from_output(
-            output,
+            output_dir,
             description,
             public=gist_public,
             include_json=include_json,
@@ -266,17 +356,54 @@ def local_cmd(
     help="How to embed transcript search data in index.html.",
 )
 @click.option(
+    "--theme",
+    type=str,
+    default="default",
+    show_default=True,
+    help="Theme name (`default`, `compact`, `high-contrast`) or custom CSS file path.",
+)
+@click.option(
+    "--markdown",
+    "markdown_enabled",
+    is_flag=True,
+    help="Also export transcript as Markdown (transcript.md).",
+)
+@click.option(
+    "--txt",
+    "text_enabled",
+    is_flag=True,
+    help="Also export transcript as plain text (transcript.txt).",
+)
+@click.option(
+    "--pdf",
+    "pdf_enabled",
+    is_flag=True,
+    help="Also export transcript as PDF (transcript.pdf, requires optional `weasyprint`).",
+)
+@click.option(
+    "--stats-json",
+    "write_stats",
+    is_flag=True,
+    help="Write stats report JSON (`stats.json`).",
+)
+@click.option(
     "--redact",
+    "redact_enabled",
+    is_flag=True,
+    help="Enable built-in redaction defaults (emails + tokens).",
+)
+@click.option(
+    "--redact-preset",
     "redact_presets",
-    type=click.Choice(sorted(REDACTION_PRESETS.keys()), case_sensitive=False),
+    type=click.Choice(available_redaction_presets(), case_sensitive=False),
     multiple=True,
-    help="Apply a built-in redaction preset before rendering.",
+    help="Apply named redaction presets. Repeatable.",
 )
 @click.option(
     "--redact-pattern",
     "redact_patterns",
     multiple=True,
-    help="Regex pattern to redact from rendered output. Repeatable.",
+    help="Regex pattern to redact from rendered/exported output. Repeatable.",
 )
 def json_cmd(
     json_file,
@@ -287,39 +414,48 @@ def json_cmd(
     gist_public,
     open_browser,
     search_mode,
+    theme,
+    markdown_enabled,
+    text_enabled,
+    pdf_enabled,
+    write_stats,
+    redact_enabled,
     redact_presets,
     redact_patterns,
 ):
     """Convert a Codex session JSONL file to HTML."""
-    auto_open = output is None and not output_auto
-    if output_auto:
-        parent_dir = Path(output) if output else Path(".")
-        output = parent_dir / Path(json_file).stem
-    elif output is None:
-        output = Path(tempfile.gettempdir()) / f"codex-session-{Path(json_file).stem}"
-
-    output = Path(output)
+    json_path = Path(json_file)
+    output_dir, auto_open = _resolve_output_dir(output, output_auto, json_path.stem)
     resolved_redaction_patterns = resolve_redaction_patterns(
+        redact_enabled,
         redact_presets,
         redact_patterns,
     )
-    index_path = generate_html(
-        json_file,
-        output,
+    session = parse_session_file(json_path)
+    index_path, stats_path = _render_single_session_output(
+        session=session,
+        source_path=json_path,
+        output_dir=output_dir,
         include_json=include_json,
-        search_mode=search_mode.lower(),
+        search_mode=_resolve_search_mode(search_mode),
+        theme=theme,
         redact_patterns=resolved_redaction_patterns,
+        markdown_enabled=markdown_enabled,
+        text_enabled=text_enabled,
+        pdf_enabled=pdf_enabled,
+        write_stats=write_stats,
     )
 
-    click.echo(f"Output: {output.resolve()}")
+    click.echo(f"Output: {output_dir.resolve()}")
+    if stats_path:
+        click.echo(f"Stats: {stats_path.resolve()}")
 
     if create_gist or gist_public:
-        session = parse_session_file(json_file)
-        description = build_gist_description(session, json_file)
-        index_filename = build_gist_index_filename(session, json_file)
+        description = build_gist_description(session, json_path)
+        index_filename = build_gist_index_filename(session, json_path)
         click.echo("Creating GitHub gist...")
         gist_url, preview_url = create_gist_from_output(
-            output,
+            output_dir,
             description,
             public=gist_public,
             include_json=include_json,
@@ -399,17 +535,87 @@ def json_cmd(
     help="How to embed transcript search data in index.html.",
 )
 @click.option(
+    "--theme",
+    type=str,
+    default="default",
+    show_default=True,
+    help="Theme name (`default`, `compact`, `high-contrast`) or custom CSS file path.",
+)
+@click.option(
+    "--markdown",
+    "markdown_enabled",
+    is_flag=True,
+    help="Also export transcript Markdown files for each session.",
+)
+@click.option(
+    "--txt",
+    "text_enabled",
+    is_flag=True,
+    help="Also export transcript text files for each session.",
+)
+@click.option(
+    "--pdf",
+    "pdf_enabled",
+    is_flag=True,
+    help="Also export transcript PDF files for each session (requires optional `weasyprint`).",
+)
+@click.option(
+    "--stats-json",
+    "write_stats",
+    is_flag=True,
+    help="Write aggregate stats report JSON (`stats.json`).",
+)
+@click.option(
     "--redact",
+    "redact_enabled",
+    is_flag=True,
+    help="Enable built-in redaction defaults (emails + tokens).",
+)
+@click.option(
+    "--redact-preset",
     "redact_presets",
-    type=click.Choice(sorted(REDACTION_PRESETS.keys()), case_sensitive=False),
+    type=click.Choice(available_redaction_presets(), case_sensitive=False),
     multiple=True,
-    help="Apply a built-in redaction preset before rendering.",
+    help="Apply named redaction presets. Repeatable.",
 )
 @click.option(
     "--redact-pattern",
     "redact_patterns",
     multiple=True,
-    help="Regex pattern to redact from rendered output. Repeatable.",
+    help="Regex pattern to redact from rendered/exported output. Repeatable.",
+)
+@click.option(
+    "--from-date",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="Filter sessions from this date (inclusive, YYYY-MM-DD).",
+)
+@click.option(
+    "--to-date",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="Filter sessions up to this date (inclusive, YYYY-MM-DD).",
+)
+@click.option(
+    "--tool",
+    "tool_filters",
+    multiple=True,
+    help="Filter archive sessions by tool name (repeatable).",
+)
+@click.option(
+    "--error-only",
+    is_flag=True,
+    help="Only include sessions containing error tool outputs.",
+)
+@click.option(
+    "--repo",
+    "repo_filter",
+    type=str,
+    help="Filter sessions by repository substring.",
+)
+@click.option(
+    "--branch",
+    "branch_filter",
+    type=str,
+    help="Filter sessions by branch substring.",
 )
 def all_cmd(
     source,
@@ -422,43 +628,65 @@ def all_cmd(
     incremental,
     workers,
     search_mode,
+    theme,
+    markdown_enabled,
+    text_enabled,
+    pdf_enabled,
+    write_stats,
+    redact_enabled,
     redact_presets,
     redact_patterns,
+    from_date,
+    to_date,
+    tool_filters,
+    error_only,
+    repo_filter,
+    branch_filter,
 ):
-    """Convert all local Codex sessions to a browsable HTML archive."""
+    """Convert local Codex sessions to a browsable HTML archive."""
     if source is None:
-        source = Path.home() / ".codex" / "sessions"
+        source_dir = Path.home() / ".codex" / "sessions"
     else:
-        source = Path(source)
+        source_dir = Path(source)
+    if not source_dir.exists():
+        raise click.ClickException(f"Source directory not found: {source_dir}")
 
-    if not source.exists():
-        raise click.ClickException(f"Source directory not found: {source}")
-
-    output = Path(output)
-
+    output_dir = Path(output)
     if not quiet:
-        click.echo(f"Scanning {source}...")
+        click.echo(f"Scanning {source_dir}...")
 
     def on_progress(_project_name, _session_name, current, total):
         if not quiet and current % 10 == 0:
             click.echo(f"  Processed {current}/{total} sessions...")
 
+    resolved_redaction_patterns = resolve_redaction_patterns(
+        redact_enabled,
+        redact_presets,
+        redact_patterns,
+    )
+
     try:
-        resolved_redaction_patterns = resolve_redaction_patterns(
-            redact_presets,
-            redact_patterns,
-        )
         stats = generate_batch_html(
-            source,
-            output,
+            source_dir,
+            output_dir,
             include_json=include_json,
             progress_callback=on_progress,
             skip_bad_files=skip_bad_files,
             strict=strict,
             incremental=incremental,
             workers=workers,
-            search_mode=search_mode.lower(),
+            search_mode=_resolve_search_mode(search_mode),
             redact_patterns=resolved_redaction_patterns,
+            theme=theme,
+            export_markdown=markdown_enabled,
+            export_txt=text_enabled,
+            export_pdf=pdf_enabled,
+            from_date=from_date.date() if from_date else None,
+            to_date=to_date.date() if to_date else None,
+            tool_filters=tool_filters,
+            error_only=error_only,
+            repo_filter=repo_filter,
+            branch_filter=branch_filter,
         )
     except RuntimeError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -478,6 +706,12 @@ def all_cmd(
         for failure in stats["failed_sessions"]:
             click.echo(f"  {failure['project']}/{failure['session']}: {failure['error']}")
 
+    stats_path = _write_stats_if_requested(
+        write_stats,
+        output_dir,
+        list(stats.get("session_stats", [])),
+    )
+
     if not quiet:
         click.echo(
             f"\nGenerated archive with {stats['total_projects']} projects, "
@@ -485,11 +719,128 @@ def all_cmd(
         )
         if stats["skipped_sessions"]:
             click.echo(f"Skipped unchanged sessions: {stats['skipped_sessions']}")
-        click.echo(f"Output: {output.resolve()}")
+        click.echo(f"Output: {output_dir.resolve()}")
+        if stats_path:
+            click.echo(f"Stats: {stats_path.resolve()}")
 
     if open_browser:
-        index_url = (output / "index.html").resolve().as_uri()
-        open_or_print_url(index_url)
+        open_or_print_url((output_dir / "index.html").resolve().as_uri())
+
+
+@cli.command("diff")
+@click.argument("session_a", type=click.Path(exists=True))
+@click.argument("session_b", type=click.Path(exists=True))
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(),
+    help="Output directory for diff report (default: temp directory).",
+)
+@click.option(
+    "--open",
+    "open_browser",
+    is_flag=True,
+    help="Open the generated diff report in your default browser.",
+)
+@click.option(
+    "--theme",
+    type=str,
+    default="default",
+    show_default=True,
+    help="Theme name (`default`, `compact`, `high-contrast`) or custom CSS file path.",
+)
+@click.option(
+    "--stats-json",
+    "write_stats",
+    is_flag=True,
+    help="Write stats report JSON (`stats.json`) for both compared sessions.",
+)
+@click.option(
+    "--force-cross-project",
+    is_flag=True,
+    help="Allow diffing sessions from different projects.",
+)
+@click.option(
+    "--redact",
+    "redact_enabled",
+    is_flag=True,
+    help="Enable built-in redaction defaults (emails + tokens).",
+)
+@click.option(
+    "--redact-preset",
+    "redact_presets",
+    type=click.Choice(available_redaction_presets(), case_sensitive=False),
+    multiple=True,
+    help="Apply named redaction presets. Repeatable.",
+)
+@click.option(
+    "--redact-pattern",
+    "redact_patterns",
+    multiple=True,
+    help="Regex pattern to redact from diff output. Repeatable.",
+)
+def diff_cmd(
+    session_a,
+    session_b,
+    output,
+    open_browser,
+    theme,
+    write_stats,
+    force_cross_project,
+    redact_enabled,
+    redact_presets,
+    redact_patterns,
+):
+    """Generate a diff view between two transcript sessions."""
+    path_a = Path(session_a)
+    path_b = Path(session_b)
+    data_a = parse_session_file(path_a)
+    data_b = parse_session_file(path_b)
+
+    project_a, _display_a = resolve_project_key(data_a)
+    project_b, _display_b = resolve_project_key(data_b)
+    if not force_cross_project and project_a != project_b:
+        raise click.ClickException(
+            "Sessions are from different projects. Use --force-cross-project to override."
+        )
+
+    resolved_redaction_patterns = resolve_redaction_patterns(
+        redact_enabled,
+        redact_presets,
+        redact_patterns,
+    )
+    if resolved_redaction_patterns:
+        data_a = redact_session_data(data_a, resolved_redaction_patterns)
+        data_b = redact_session_data(data_b, resolved_redaction_patterns)
+
+    if output:
+        output_dir = Path(output)
+    else:
+        output_dir = Path(tempfile.gettempdir()) / f"codex-diff-{path_a.stem}-vs-{path_b.stem}"
+
+    index_path, diff_data = generate_diff_report(
+        data_a,
+        data_b,
+        output_dir,
+        source_a=path_a,
+        source_b=path_b,
+        theme=theme,
+    )
+    click.echo(f"Output: {output_dir.resolve()}")
+
+    if write_stats:
+        report = build_stats_report(
+            [
+                collect_session_metrics(data_a, source_path=path_a),
+                collect_session_metrics(data_b, source_path=path_b),
+            ]
+        )
+        report["diff_summary"] = diff_data.get("summary", {})
+        stats_path = write_stats_report(report, output_dir / "stats.json")
+        click.echo(f"Stats: {stats_path.resolve()}")
+
+    if open_browser:
+        open_or_print_url(index_path.resolve().as_uri())
 
 
 @cli.command("serve")

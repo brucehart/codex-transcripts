@@ -9,20 +9,58 @@
             {% if total_failed_sessions %}| {{ total_failed_sessions }} failed{% endif %}
         </p>
 
-        {% for project in projects %}
-        <div class="index-item">
-            <a href="{{ project.slug }}/index.html">
+        <div class="archive-filters">
+            <label>Date from
+                <input type="date" id="filter-from-date">
+            </label>
+            <label>Date to
+                <input type="date" id="filter-to-date">
+            </label>
+            <label>Tool name
+                <input type="text" id="filter-tool" placeholder="shell">
+            </label>
+            <label>Repo
+                <input type="text" id="filter-repo" placeholder="example/repo">
+            </label>
+            <label>Branch
+                <input type="text" id="filter-branch" placeholder="main">
+            </label>
+            <label class="checkbox-label">
+                <input type="checkbox" id="filter-error-only">
+                Error turns only
+            </label>
+            <div class="actions">
+                <button id="filter-reset-btn" type="button" class="secondary">Reset</button>
+            </div>
+        </div>
+        <p id="filter-result-count" class="archive-filter-count"></p>
+
+        <div data-archive-filter-root>
+        {% for session in sessions %}
+        <div class="index-item archive-session-item"
+             data-date="{{ session.date_iso }}"
+             data-tools="{{ session.tools_csv }}"
+             data-error-turns="{{ session.error_turns }}"
+             data-repo="{{ session.repo }}"
+             data-branch="{{ session.branch }}">
+            <a href="{{ session.project_slug }}/{{ session.name }}/index.html">
                 <div class="index-item-header">
-                    <span class="index-item-number">{{ project.name }}</span>
-                    <time>{{ project.recent_date }}</time>
+                    <span class="index-item-number">{{ session.project_name }}</span>
+                    <time datetime="{{ session.started_at }}" data-timestamp="{{ session.started_at }}">{{ session.date_label }}</time>
                 </div>
                 <div class="index-item-content">
                     <p style="margin: 0;">
-                        {{ project.session_count }} rendered session{% if project.session_count != 1 %}s{% endif %}
-                        {% if project.failed_count %}| {{ project.failed_count }} failed{% endif %}
+                        {{ session.summary[:120] }}{% if session.summary|length > 120 %}...{% endif %}
+                    </p>
+                    <p style="margin: 8px 0 0; color: var(--text-muted); font-size: 0.85rem;">
+                        {{ session.repo or "unknown repo" }} | {{ session.branch or "unknown branch" }}
+                        {% if session.tool_count %}| {{ session.tool_count }} tool{{ "s" if session.tool_count != 1 else "" }}{% endif %}
+                        {% if session.error_turns %}| {{ session.error_turns }} error turn{{ "s" if session.error_turns != 1 else "" }}{% endif %}
                     </p>
                 </div>
             </a>
         </div>
         {% endfor %}
+        </div>
+        <script src="assets/archive-filters.js"></script>
 {%- endblock %}

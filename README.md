@@ -20,11 +20,13 @@ uvx codex-transcripts --help
 
 ## Usage
 
-This tool supports three commands:
+This tool supports five commands:
 
 - `local` (default) - pick from recent local sessions in `~/.codex/sessions`
 - `json` - convert a specific JSONL file
 - `all` - convert all sessions into a browsable archive
+- `diff` - compare prompts/tool calls between two sessions
+- `serve` - serve generated output over local HTTP
 
 ### Convert a recent local session
 
@@ -56,21 +58,33 @@ codex-transcripts json ~/.codex/sessions/2025/12/24/rollout-...jsonl -o ./output
 codex-transcripts all -o ./codex-archive
 ```
 
+### Diff two sessions from the same project
+
+```bash
+codex-transcripts diff ~/.codex/sessions/.../run-a.jsonl ~/.codex/sessions/.../run-b.jsonl -o ./diff-report
+```
+
 ### Output options
 
-All commands support:
+`local` and `json` support:
 
 - `-o, --output DIRECTORY` - output directory (default: temporary directory for `local`/`json`)
 - `-a, --output-auto` - auto-name a subdirectory based on the session filename
 - `--open` - open the generated `index.html` in your default browser
 - `--json` - include the source JSONL file in the output directory
 - `--search-mode inline|external|auto` - control whether search data is embedded inline or loaded from `search-index.json`
-- `--redact basic` - apply built-in redaction rules before rendering
+- `--theme default|compact|high-contrast|PATH.css` - use a built-in theme or custom CSS file
+- `--markdown` - also export `transcript.md`
+- `--txt` - also export `transcript.txt`
+- `--pdf` - also export `transcript.pdf` (requires optional `weasyprint`)
+- `--stats-json` - write `stats.json`
+- `--redact` - enable default redaction presets (`emails`, `tokens`)
+- `--redact-preset PRESET` - apply preset redaction patterns (`emails`, `tokens`, `paths`, `hostnames`; repeatable)
 - `--redact-pattern REGEX` - apply custom regex redaction (repeatable)
 - `--gist` - create a GitHub gist from the generated HTML and output a preview URL (requires the `gh` CLI)
 - `--gist-public` - create a public gist instead of a secret gist
 
-Generated outputs now also include `search-index.json`, which powers fast transcript search.
+Generated outputs include static search artifacts (`search-index.json`, `search-index.js`, and shards when needed), so search works with `file://` and scales better for large transcripts.
 
 ### Archive reliability and scale options
 
@@ -80,6 +94,14 @@ For large archives, `all` additionally supports:
 - `--strict` - fail immediately on parse/render errors
 - `--incremental` - skip unchanged sessions using a cache file in the archive output directory
 - `--workers N` - parallelize session rendering
+- `--theme ...`, `--markdown`, `--txt`, `--pdf`, `--stats-json`
+- `--from-date YYYY-MM-DD` / `--to-date YYYY-MM-DD`
+- `--tool TOOL_NAME` (repeatable)
+- `--error-only`
+- `--repo PATTERN`
+- `--branch PATTERN`
+
+Archive and project index pages include built-in filtering controls for date range, tool name, error-only sessions, repo, and branch.
 
 ### Serve local output over HTTP
 

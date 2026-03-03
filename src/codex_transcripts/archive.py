@@ -4,18 +4,21 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 import json
 from pathlib import Path
 from typing import Any, Sequence
 
+from .assets import ensure_output_assets
 from .common import extract_github_repo, format_project_label, slugify
+from .exporters import write_transcript_exports
 from .parser import SessionData, get_session_summary_from_session, parse_session_file
-from .renderer import CSS, JS, SearchMode, generate_html_from_session, get_template
+from .renderer import SearchMode, generate_html_from_session, get_template
+from .stats import collect_session_metrics
 
 
 INCREMENTAL_CACHE_FILENAME = ".codex-transcripts-cache.json"
-INCREMENTAL_CACHE_VERSION = 1
+INCREMENTAL_CACHE_VERSION = 2
 
 
 @dataclass
@@ -117,7 +120,6 @@ def scan_all_sessions(folder: str | Path, skip_bad_files: bool = True):
 
         project_key, display_name = resolve_project_key(session)
         project_slug = slugify(project_key)
-
         if project_slug not in projects:
             projects[project_slug] = {
                 "key": project_key,
@@ -154,33 +156,101 @@ def find_all_sessions(folder: str | Path):
     return projects
 
 
+def _parse_iso_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
+    except ValueError:
+        return None
+
+
+def _session_date_for_filter(session: dict[str, Any]) -> date:
+    parsed: SessionData = session["parsed_session"]
+    started_day = _parse_iso_date(parsed.started_at)
+    if started_day:
+        return started_day
+    return datetime.fromtimestamp(float(session["mtime"])).date()
+
+
+def _session_matches_filters(
+    session: dict[str, Any],
+    *,
+    from_date: date | None,
+    to_date: date | None,
+    tool_filters: Sequence[str],
+    error_only: bool,
+    repo_filter: str | None,
+    branch_filter: str | None,
+    metrics: dict[str, Any],
+) -> bool:
+    session_day = _session_date_for_filter(session)
+    if from_date and session_day < from_date:
+        return False
+    if to_date and session_day > to_date:
+        return False
+
+    tool_set = {name.lower() for name in metrics.get("tools", {}).get("unique", [])}
+    normalized_tools = {tool.lower().strip() for tool in tool_filters if tool.strip()}
+    if normalized_tools and not (tool_set & normalized_tools):
+        return False
+
+    error_turns = int(metrics.get("errors", {}).get("tool_output_errors", 0))
+    if error_only and error_turns < 1:
+        return False
+
+    repo = (metrics.get("repo") or "").lower()
+    branch = (metrics.get("branch") or "").lower()
+    if repo_filter and repo_filter.lower() not in repo:
+        return False
+    if branch_filter and branch_filter.lower() not in branch:
+        return False
+
+    return True
+
+
+def _session_template_data(project: dict[str, Any], session: dict[str, Any]) -> dict[str, Any]:
+    mod_time = datetime.fromtimestamp(session["mtime"])
+    date_iso = mod_time.strftime("%Y-%m-%d")
+    started_at = session.get("started_at") or mod_time.isoformat()
+    return {
+        "name": session["path"].stem,
+        "summary": session["summary"],
+        "date": mod_time.strftime("%Y-%m-%d %H:%M"),
+        "date_iso": date_iso,
+        "date_label": mod_time.strftime("%Y-%m-%d %H:%M"),
+        "size_kb": session["size"] / 1024,
+        "repo": session.get("repo"),
+        "branch": session.get("branch"),
+        "tools_csv": ",".join(session.get("tool_names", [])),
+        "tool_count": int(session.get("tool_call_count", 0)),
+        "error_turns": int(session.get("error_turns", 0)),
+        "project_slug": slugify(project["key"]),
+        "project_name": project["name"],
+        "started_at": started_at,
+    }
+
+
 def _generate_project_index(
     project: dict[str, Any],
     output_dir: str | Path,
+    *,
     failed_sessions: list[dict[str, str]] | None = None,
+    theme: str | None = None,
 ):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    ensure_output_assets(output_dir, theme=theme)
+
     template = get_template("project_index.html")
-
-    sessions_data = []
-    for session in project["sessions"]:
-        mod_time = datetime.fromtimestamp(session["mtime"])
-        sessions_data.append(
-            {
-                "name": session["path"].stem,
-                "summary": session["summary"],
-                "date": mod_time.strftime("%Y-%m-%d %H:%M"),
-                "size_kb": session["size"] / 1024,
-            }
-        )
-
-    failed_data: list[dict[str, str]] = []
-    for failure in failed_sessions or []:
-        failed_data.append(
-            {
-                "name": failure["session"],
-                "error": failure["error"],
-            }
-        )
+    sessions_data = [_session_template_data(project, session) for session in project["sessions"]]
+    failed_data = [
+        {
+            "name": failure["session"],
+            "error": failure["error"],
+        }
+        for failure in (failed_sessions or [])
+    ]
 
     html_content = template.render(
         project_name=project["name"],
@@ -188,52 +258,33 @@ def _generate_project_index(
         session_count=len(sessions_data),
         failed_sessions=failed_data,
         failed_count=len(failed_data),
-        css=CSS,
-        js=JS,
     )
-
-    output_path = Path(output_dir) / "index.html"
-    output_path.write_text(html_content, encoding="utf-8")
+    (output_dir / "index.html").write_text(html_content, encoding="utf-8")
 
 
-def _generate_master_index(projects, output_dir: str | Path):
+def _generate_master_index(projects: Sequence[dict[str, Any]], output_dir: str | Path, *, theme: str | None = None):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    ensure_output_assets(output_dir, theme=theme)
+
     template = get_template("master_index.html")
-
-    projects_data = []
-    total_sessions = 0
+    sessions_data: list[dict[str, Any]] = []
     total_failed_sessions = 0
 
     for project in projects:
-        session_count = len(project["sessions"])
-        failed_count = len(project.get("failed_sessions", []))
-        total_sessions += session_count
-        total_failed_sessions += failed_count
-        if project["sessions"]:
-            most_recent = datetime.fromtimestamp(project["sessions"][0]["mtime"])
-            recent_date = most_recent.strftime("%Y-%m-%d")
-        else:
-            recent_date = "N/A"
-        projects_data.append(
-            {
-                "name": project["name"],
-                "slug": slugify(project["key"]),
-                "session_count": session_count,
-                "failed_count": failed_count,
-                "recent_date": recent_date,
-            }
-        )
+        total_failed_sessions += len(project.get("failed_sessions", []))
+        for session in project["sessions"]:
+            sessions_data.append(_session_template_data(project, session))
+
+    sessions_data.sort(key=lambda s: s["date_label"], reverse=True)
 
     html_content = template.render(
-        projects=projects_data,
+        sessions=sessions_data,
         total_projects=len(projects),
-        total_sessions=total_sessions,
+        total_sessions=len(sessions_data),
         total_failed_sessions=total_failed_sessions,
-        css=CSS,
-        js=JS,
     )
-
-    output_path = Path(output_dir) / "index.html"
-    output_path.write_text(html_content, encoding="utf-8")
+    (output_dir / "index.html").write_text(html_content, encoding="utf-8")
 
 
 def _session_cache_key(path: Path) -> str:
@@ -246,6 +297,10 @@ def _load_incremental_cache(
     include_json: bool,
     search_mode: SearchMode,
     redact_patterns: Sequence[str],
+    theme: str | None,
+    export_markdown: bool,
+    export_txt: bool,
+    export_pdf: bool,
 ) -> dict[str, dict[str, float | int]]:
     cache_path = output_dir / INCREMENTAL_CACHE_FILENAME
     if not cache_path.exists():
@@ -255,10 +310,7 @@ def _load_incremental_cache(
         raw = json.loads(cache_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
-
-    if not isinstance(raw, dict):
-        return {}
-    if raw.get("version") != INCREMENTAL_CACHE_VERSION:
+    if not isinstance(raw, dict) or raw.get("version") != INCREMENTAL_CACHE_VERSION:
         return {}
 
     options = raw.get("options")
@@ -269,6 +321,14 @@ def _load_incremental_cache(
     if options.get("search_mode") != search_mode:
         return {}
     if options.get("redact_patterns") != list(redact_patterns):
+        return {}
+    if options.get("theme") != (theme or ""):
+        return {}
+    if options.get("export_markdown") != export_markdown:
+        return {}
+    if options.get("export_txt") != export_txt:
+        return {}
+    if options.get("export_pdf") != export_pdf:
         return {}
 
     sessions = raw.get("sessions")
@@ -282,7 +342,7 @@ def _load_incremental_cache(
         mtime = value.get("mtime")
         size = value.get("size")
         if isinstance(mtime, (int, float)) and isinstance(size, int):
-            validated[key] = {"mtime": mtime, "size": size}
+            validated[key] = {"mtime": float(mtime), "size": int(size)}
     return validated
 
 
@@ -293,6 +353,10 @@ def _write_incremental_cache(
     include_json: bool,
     search_mode: SearchMode,
     redact_patterns: Sequence[str],
+    theme: str | None,
+    export_markdown: bool,
+    export_txt: bool,
+    export_pdf: bool,
 ) -> None:
     payload = {
         "version": INCREMENTAL_CACHE_VERSION,
@@ -300,14 +364,15 @@ def _write_incremental_cache(
             "include_json": include_json,
             "search_mode": search_mode,
             "redact_patterns": list(redact_patterns),
+            "theme": theme or "",
+            "export_markdown": export_markdown,
+            "export_txt": export_txt,
+            "export_pdf": export_pdf,
         },
         "sessions": sessions,
     }
     cache_path = output_dir / INCREMENTAL_CACHE_FILENAME
-    cache_path.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    cache_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def generate_batch_html(
@@ -321,6 +386,16 @@ def generate_batch_html(
     workers: int = 1,
     search_mode: SearchMode = "auto",
     redact_patterns: Sequence[str] | None = None,
+    theme: str | None = None,
+    export_markdown: bool = False,
+    export_txt: bool = False,
+    export_pdf: bool = False,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    tool_filters: Sequence[str] | None = None,
+    error_only: bool = False,
+    repo_filter: str | None = None,
+    branch_filter: str | None = None,
 ):
     source_folder = Path(source_folder)
     output_dir = Path(output_dir)
@@ -332,11 +407,43 @@ def generate_batch_html(
         skip_bad_files=effective_skip_bad_files,
     )
 
+    normalized_redact_patterns = tuple(redact_patterns or ())
+    normalized_tool_filters = tuple(tool_filters or ())
+
+    # Attach metrics and apply archive-level filters.
+    filtered_projects: list[dict[str, Any]] = []
+    for project in projects:
+        filtered_sessions: list[dict[str, Any]] = []
+        for session in project["sessions"]:
+            metrics = collect_session_metrics(
+                session["parsed_session"],
+                source_path=session["path"],
+            )
+            session["session_metrics"] = metrics
+            if _session_matches_filters(
+                session,
+                from_date=from_date,
+                to_date=to_date,
+                tool_filters=normalized_tool_filters,
+                error_only=error_only,
+                repo_filter=repo_filter,
+                branch_filter=branch_filter,
+                metrics=metrics,
+            ):
+                filtered_sessions.append(session)
+        if filtered_sessions:
+            filtered_projects.append(
+                {
+                    **project,
+                    "sessions": filtered_sessions,
+                }
+            )
+
+    projects = filtered_projects
     total_session_count = sum(len(p["sessions"]) for p in projects)
     processed_count = 0
     failed_sessions: list[dict[str, str]] = []
     skipped_sessions = 0
-    normalized_redact_patterns = tuple(redact_patterns or ())
 
     cache_by_session: dict[str, dict[str, float | int]] = {}
     if incremental:
@@ -345,6 +452,10 @@ def generate_batch_html(
             include_json=include_json,
             search_mode=search_mode,
             redact_patterns=normalized_redact_patterns,
+            theme=theme,
+            export_markdown=export_markdown,
+            export_txt=export_txt,
+            export_pdf=export_pdf,
         )
     updated_cache = dict(cache_by_session)
 
@@ -363,7 +474,6 @@ def generate_batch_html(
             "sessions": [],
             "failed_sessions": [],
         }
-
         for session in project["sessions"]:
             tasks.append(
                 {
@@ -380,10 +490,11 @@ def generate_batch_html(
             "size": int(session["size"]),
         }
 
-    def mark_success(task: dict[str, Any], cache_state: dict[str, float | int], skipped: bool):
+    def mark_success(task: dict[str, Any], result: dict[str, Any]):
         nonlocal skipped_sessions
         project_slug = task["project_slug"]
         session = task["session"]
+        metrics = session["session_metrics"]
         project_results[project_slug]["sessions"].append(
             {
                 "path": session["path"],
@@ -391,10 +502,17 @@ def generate_batch_html(
                 "mtime": session["mtime"],
                 "size": session["size"],
                 "session_id": session["session_id"],
+                "repo": metrics.get("repo"),
+                "branch": metrics.get("branch"),
+                "tool_names": metrics.get("tools", {}).get("unique", []),
+                "tool_call_count": metrics.get("counts", {}).get("tool_calls", 0),
+                "error_turns": metrics.get("errors", {}).get("tool_output_errors", 0),
+                "started_at": metrics.get("started_at"),
+                "session_metrics": metrics,
             }
         )
-        updated_cache[_session_cache_key(session["path"])] = cache_state
-        if skipped:
+        updated_cache[_session_cache_key(session["path"])] = result["cache_state"]
+        if result["skipped"]:
             skipped_sessions += 1
 
     def mark_failure(task: dict[str, Any], error: str):
@@ -415,29 +533,55 @@ def generate_batch_html(
         cache_state = cache_state_for(session)
         cache_key = _session_cache_key(session_path)
 
+        expected_files = [
+            session_dir / "index.html",
+            session_dir / "search-index.json",
+            session_dir / "assets" / "base.css",
+            session_dir / "assets" / "theme.css",
+        ]
+        if export_markdown:
+            expected_files.append(session_dir / "transcript.md")
+        if export_txt:
+            expected_files.append(session_dir / "transcript.txt")
+        if export_pdf:
+            expected_files.append(session_dir / "transcript.pdf")
+
         if incremental:
             cached = cache_by_session.get(cache_key)
-            if (
-                cached == cache_state
-                and (session_dir / "index.html").exists()
-                and (session_dir / "search-index.json").exists()
-            ):
+            if cached == cache_state and all(path.exists() for path in expected_files):
                 return {"skipped": True, "cache_state": cache_state}
 
+        parsed_session = session["parsed_session"]
         generate_html_from_session(
-            session["parsed_session"],
+            parsed_session,
             session_dir,
             source_path=session_path,
             include_json=include_json,
             search_mode=search_mode,
             redact_patterns=normalized_redact_patterns,
+            theme=theme,
         )
+        if export_markdown or export_txt or export_pdf:
+            from .redaction import redact_session_data
+
+            export_session = (
+                redact_session_data(parsed_session, normalized_redact_patterns)
+                if normalized_redact_patterns
+                else parsed_session
+            )
+            write_transcript_exports(
+                export_session,
+                session_dir,
+                markdown_enabled=export_markdown,
+                text_enabled=export_txt,
+                pdf_enabled=export_pdf,
+            )
         return {"skipped": False, "cache_state": cache_state}
 
     def on_task_complete(task: dict[str, Any], result: dict[str, Any] | None, error: Exception | None):
         nonlocal processed_count
         if error is None and result is not None:
-            mark_success(task, result["cache_state"], skipped=bool(result["skipped"]))
+            mark_success(task, result)
         elif error is not None:
             mark_failure(task, str(error))
 
@@ -484,15 +628,15 @@ def generate_batch_html(
     for project_slug in project_order:
         project = project_results[project_slug]
         project["sessions"].sort(key=lambda s: s["mtime"], reverse=True)
-        project_dir = output_dir / project_slug
         _generate_project_index(
             project,
-            project_dir,
+            output_dir / project_slug,
             failed_sessions=project["failed_sessions"],
+            theme=theme,
         )
         ordered_projects.append(project)
 
-    _generate_master_index(ordered_projects, output_dir)
+    _generate_master_index(ordered_projects, output_dir, theme=theme)
 
     if incremental:
         _write_incremental_cache(
@@ -501,9 +645,18 @@ def generate_batch_html(
             include_json=include_json,
             search_mode=search_mode,
             redact_patterns=normalized_redact_patterns,
+            theme=theme,
+            export_markdown=export_markdown,
+            export_txt=export_txt,
+            export_pdf=export_pdf,
         )
 
     total_successful_sessions = sum(len(project["sessions"]) for project in ordered_projects)
+    all_session_stats = [
+        session["session_metrics"]
+        for project in ordered_projects
+        for session in project["sessions"]
+    ]
 
     return {
         "total_projects": len(ordered_projects),
@@ -512,4 +665,5 @@ def generate_batch_html(
         "scan_failures": scan_failures,
         "skipped_sessions": skipped_sessions,
         "output_dir": output_dir,
+        "session_stats": all_session_stats,
     }

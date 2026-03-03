@@ -1,0 +1,32 @@
+:root {
+  --bg-color: #fefefe;
+  --card-bg: #ffffff;
+  --user-bg: #deebff;
+  --user-border: #003a8c;
+  --assistant-bg: #f3f3f3;
+  --assistant-border: #3a3a3a;
+  --thinking-bg: #fff0cc;
+  --thinking-border: #b25d00;
+  --thinking-text: #1f1f1f;
+  --tool-bg: #efe3ff;
+  --tool-border: #4a148c;
+  --tool-result-bg: #ddf5df;
+  --tool-error-bg: #ffdede;
+  --text-color: #111111;
+  --text-muted: #3a3a3a;
+  --code-bg: #101820;
+  --code-text: #f2ffad;
+}
+
+body {
+  font-family: "Atkinson Hyperlegible", "IBM Plex Sans", "Segoe UI", sans-serif;
+}
+
+a {
+  color: #003a8c;
+}
+
+.index-item a:hover,
+.search-result a:hover {
+  background: rgba(0, 58, 140, 0.14);
+}
