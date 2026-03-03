@@ -1,5 +1,8 @@
 (function() {
-    var totalPages = {{ total_pages }};
+    var inlineIndex = window.__SEARCH_INDEX__ || null;
+    var totalPages = (inlineIndex && inlineIndex.total_pages) || {{ total_pages }};
+    var cachedItems = (inlineIndex && Array.isArray(inlineIndex.items)) ? inlineIndex.items : null;
+
     var searchBox = document.getElementById('search-box');
     var searchInput = document.getElementById('search-input');
     var searchBtn = document.getElementById('search-btn');
@@ -12,10 +15,6 @@
 
     if (!searchBox || !modal) return;
 
-    // Hide search on file:// protocol (doesn't work due to CORS restrictions)
-    if (window.location.protocol === 'file:') return;
-
-    // Show search box (progressive enhancement)
     searchBox.style.display = 'flex';
 
     function escapeHtml(text) {
@@ -24,8 +23,37 @@
         return div.innerHTML;
     }
 
-    function escapeRegex(string) {
-        return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    function escapeRegex(text) {
+        return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    function normalizeWhitespace(text) {
+        return (text || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function highlightSnippet(text, query) {
+        var escaped = escapeHtml(text);
+        var regex = new RegExp('(' + escapeRegex(query) + ')', 'gi');
+        return escaped.replace(regex, '<mark>$1</mark>');
+    }
+
+    function buildSnippet(text, query) {
+        var normalized = normalizeWhitespace(text);
+        if (!normalized) return '';
+
+        var lower = normalized.toLowerCase();
+        var lowerQuery = query.toLowerCase();
+        var index = lower.indexOf(lowerQuery);
+        if (index === -1) {
+            return normalized.length > 220 ? normalized.slice(0, 220) + '...' : normalized;
+        }
+
+        var start = Math.max(0, index - 100);
+        var end = Math.min(normalized.length, index + query.length + 120);
+        var snippet = normalized.slice(start, end);
+        if (start > 0) snippet = '...' + snippet;
+        if (end < normalized.length) snippet = snippet + '...';
+        return snippet;
     }
 
     function openModal(query) {
@@ -52,122 +80,86 @@
         }
     }
 
-    function highlightTextNodes(element, searchTerm) {
-        var walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, null, false);
-        var nodesToReplace = [];
-
-        while (walker.nextNode()) {
-            var node = walker.currentNode;
-            if (node.nodeValue.toLowerCase().indexOf(searchTerm.toLowerCase()) !== -1) {
-                nodesToReplace.push(node);
-            }
+    async function loadIndexItems() {
+        if (cachedItems) {
+            return cachedItems;
         }
 
-        nodesToReplace.forEach(function(node) {
-            var text = node.nodeValue;
-            var regex = new RegExp('(' + escapeRegex(searchTerm) + ')', 'gi');
-            var parts = text.split(regex);
-            if (parts.length > 1) {
-                var span = document.createElement('span');
-                parts.forEach(function(part) {
-                    if (part.toLowerCase() === searchTerm.toLowerCase()) {
-                        var mark = document.createElement('mark');
-                        mark.textContent = part;
-                        span.appendChild(mark);
-                    } else {
-                        span.appendChild(document.createTextNode(part));
-                    }
-                });
-                node.parentNode.replaceChild(span, node);
+        if (window.location.protocol === 'file:') {
+            return [];
+        }
+
+        try {
+            var response = await fetch('search-index.json');
+            if (!response.ok) {
+                throw new Error('failed to load search-index.json');
             }
-        });
+            var payload = await response.json();
+            cachedItems = Array.isArray(payload.items) ? payload.items : [];
+            return cachedItems;
+        } catch (_) {
+            return [];
+        }
     }
 
-    function fixInternalLinks(element, pageFile) {
-        var links = element.querySelectorAll('a[href^="#"]');
-        links.forEach(function(link) {
-            var href = link.getAttribute('href');
-            link.setAttribute('href', pageFile + href);
-        });
-    }
+    function renderResult(item, query) {
+        var link = item.page + '#' + item.anchor;
+        var role = item.role || 'Entry';
+        var pageLabel = item.page || 'page';
+        var timeLabel = item.timestamp || '';
+        var snippet = buildSnippet(item.text || '', query);
 
-    function processPage(pageFile, html, query) {
-        var parser = new DOMParser();
-        var doc = parser.parseFromString(html, 'text/html');
-        var resultsFromPage = 0;
-
-        var messages = doc.querySelectorAll('.message');
-        messages.forEach(function(msg) {
-            var text = msg.textContent || '';
-            if (text.toLowerCase().indexOf(query.toLowerCase()) !== -1) {
-                resultsFromPage++;
-
-                var msgId = msg.id || '';
-                var link = pageFile + (msgId ? '#' + msgId : '');
-
-                var clone = msg.cloneNode(true);
-                fixInternalLinks(clone, pageFile);
-                highlightTextNodes(clone, query);
-
-                var resultDiv = document.createElement('div');
-                resultDiv.className = 'search-result';
-                resultDiv.innerHTML = '<a href="' + link + '">' +
-                    '<div class="search-result-page">' + escapeHtml(pageFile) + '</div>' +
-                    '<div class="search-result-content">' + clone.innerHTML + '</div>' +
-                    '</a>';
-                searchResults.appendChild(resultDiv);
-            }
-        });
-
-        return resultsFromPage;
+        var resultDiv = document.createElement('div');
+        resultDiv.className = 'search-result';
+        resultDiv.innerHTML =
+            '<a href="' + escapeHtml(link) + '">' +
+                '<div class="search-result-page">' +
+                    escapeHtml(pageLabel) + ' • ' + escapeHtml(role) + (timeLabel ? ' • ' + escapeHtml(timeLabel) : '') +
+                '</div>' +
+                '<div class="search-result-content">' + highlightSnippet(snippet, query) + '</div>' +
+            '</a>';
+        searchResults.appendChild(resultDiv);
     }
 
     async function performSearch(query) {
-        if (!query.trim()) {
+        var trimmed = (query || '').trim();
+        if (!trimmed) {
             searchStatus.textContent = 'Enter a search term';
             return;
         }
 
-        updateUrlHash(query);
+        updateUrlHash(trimmed);
         searchResults.innerHTML = '';
-        searchStatus.textContent = 'Searching...';
+        searchStatus.textContent = 'Loading search index...';
 
-        var resultsFound = 0;
-        var pagesSearched = 0;
-
-        var pagesToFetch = [];
-        for (var i = 1; i <= totalPages; i++) {
-            pagesToFetch.push('page-' + String(i).padStart(3, '0') + '.html');
+        var items = await loadIndexItems();
+        if (!items.length) {
+            if (window.location.protocol === 'file:') {
+                searchStatus.textContent = 'Search index unavailable for file URLs. Use `codex-transcripts serve`.';
+            } else {
+                searchStatus.textContent = 'No search index data available.';
+            }
+            return;
         }
 
-        searchStatus.textContent = 'Searching...';
+        var lowerQuery = trimmed.toLowerCase();
+        var matches = [];
 
-        var batchSize = 3;
-        for (var i = 0; i < pagesToFetch.length; i += batchSize) {
-            var batch = pagesToFetch.slice(i, i + batchSize);
-
-            var promises = batch.map(function(pageFile) {
-                return fetch(pageFile)
-                    .then(function(response) {
-                        if (!response.ok) throw new Error('Failed to fetch');
-                        return response.text();
-                    })
-                    .then(function(html) {
-                        var count = processPage(pageFile, html, query);
-                        resultsFound += count;
-                        pagesSearched++;
-                        searchStatus.textContent = 'Found ' + resultsFound + ' result(s) in ' + pagesSearched + '/' + totalPages + ' pages...';
-                    })
-                    .catch(function() {
-                        pagesSearched++;
-                        searchStatus.textContent = 'Found ' + resultsFound + ' result(s) in ' + pagesSearched + '/' + totalPages + ' pages...';
-                    });
-            });
-
-            await Promise.all(promises);
+        for (var i = 0; i < items.length; i++) {
+            var item = items[i];
+            var text = normalizeWhitespace(item.text || '');
+            if (!text) continue;
+            if (text.toLowerCase().indexOf(lowerQuery) !== -1) {
+                matches.push(item);
+            }
         }
 
-        searchStatus.textContent = 'Found ' + resultsFound + ' result(s) in ' + totalPages + ' pages';
+        for (var j = 0; j < matches.length; j++) {
+            renderResult(matches[j], trimmed);
+        }
+
+        searchStatus.textContent =
+            'Found ' + matches.length + ' result(s) in ' + items.length + ' indexed entries (' + totalPages + ' pages)';
     }
 
     searchBtn.addEventListener('click', function() {

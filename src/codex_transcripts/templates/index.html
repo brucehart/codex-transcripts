@@ -35,6 +35,7 @@
             <div id="search-results"></div>
         </dialog>
         <script>
+window.__SEARCH_INDEX__ = {{ search_index_data|tojson }};
 {% include "search.js" %}
         </script>
 {%- endblock %}

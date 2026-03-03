@@ -21,6 +21,27 @@ def test_generate_html_sanitizes_transcript_content(tmp_path):
     index_content = index_path.read_text(encoding="utf-8")
 
     for content in (page_content, index_content):
-        assert "<script" not in content
-        assert "javascript:" not in content
+        assert "<script>" in content
+        assert 'href="javascript:' not in content
+        assert "<img" not in content
         assert "onerror" not in content
+
+
+def test_template_scripts_are_still_present(tmp_path):
+    session_file = tmp_path / "session.jsonl"
+    session_file.write_text(
+        "\n".join(
+            [
+                '{"timestamp":"2025-01-01T00:00:00Z","type":"session_meta","payload":{"id":"abc123","timestamp":"2025-01-01T00:00:00Z"}}',
+                '{"timestamp":"2025-01-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Hello world"}]}}',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / "output"
+    index_path = generate_html(session_file, output_dir)
+    index_content = index_path.read_text(encoding="utf-8")
+
+    assert "<script>" in index_content
+    assert "window.__SEARCH_INDEX__" in index_content

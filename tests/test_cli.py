@@ -1,3 +1,4 @@
+import importlib
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -25,6 +26,7 @@ def test_generate_html_creates_pages(tmp_path):
 
     assert index_path.exists()
     assert (output_dir / "page-001.html").exists()
+    assert (output_dir / "search-index.json").exists()
     content = index_path.read_text(encoding="utf-8")
     assert "Codex transcript" in content
     assert "Hello" in content
@@ -59,7 +61,8 @@ def test_local_cli_generates_output(tmp_path, monkeypatch):
         return DummySelect(session_file)
 
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr("codex_transcripts.questionary.select", fake_select)
+    cli_module = importlib.import_module("codex_transcripts.cli")
+    monkeypatch.setattr(cli_module.questionary, "select", fake_select)
 
     output_dir = tmp_path / "output"
     runner = CliRunner()
@@ -94,3 +97,10 @@ def test_build_local_session_label_includes_repo():
     summary = get_session_summary(FIXTURE)
     label = build_local_session_label(session, summary, max_length=80)
     assert label.startswith("example/repo — Hello")
+
+
+def test_cli_help_lists_serve_command():
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--help"])
+    assert result.exit_code == 0, result.output
+    assert "serve" in result.output

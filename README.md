@@ -67,6 +67,18 @@ All commands support:
 - `--gist` - create a GitHub gist from the generated HTML and output a preview URL (requires the `gh` CLI)
 - `--gist-public` - create a public gist instead of a secret gist
 
+Generated outputs now also include `search-index.json`, which powers fast transcript search.
+
+### Serve local output over HTTP
+
+For reliable search and navigation in browser environments that restrict `file://` access:
+
+```bash
+codex-transcripts serve ./codex-archive -p 8000
+```
+
+Then open `http://127.0.0.1:8000/`.
+
 If no browser is available, the CLI prints a `file://` URL you can open locally (useful for WSL2).
 
 ## Development
